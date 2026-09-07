@@ -1,0 +1,28 @@
+{
+  "name": "vaultbreaker-root",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Vaultbreaker — Scoped-capability broker for AI agents on Hedera with Ledger seed protection",
+  "workspaces": [
+    "broker",
+    "app"
+  ],
+  "scripts": {
+    "build": "npm run build:contracts && npm run build:broker && npm run build:app",
+    "build:contracts": "cd contracts && \"C:\\Users\\harsh\\.foundry\\bin\\forge.exe\" build",
+    "build:broker": "npm run build --workspace=broker",
+    "build:app": "npm run build --workspace=app",
+    "test": "npm run test:contracts && npm run test:broker",
+    "test:contracts": "cd contracts && \"C:\\Users\\harsh\\.foundry\\bin\\forge.exe\" test -vvv",
+    "test:broker": "npm run test --workspace=broker",
+    "dev": "concurrently -k -n broker,app -c blue,magenta \"npm run dev --workspace=broker\" \"npm run dev --workspace=app\"",
+    "dev:broker": "npm run dev --workspace=broker",
+    "dev:app": "npm run dev --workspace=app",
+    "deploy:contracts": "cd contracts && \"C:\\Users\\harsh\\.foundry\\bin\\forge.exe\" script script/Deploy.s.sol --rpc-url https://testnet.hashio.io/api --broadcast"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
