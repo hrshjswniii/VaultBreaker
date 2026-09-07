@@ -1,5 +1,20 @@
 # Vaultbreaker — Scoped-Capability Broker for AI Agents
 
+<p align="center">
+  <img src="assets/banner.png" alt="Vaultbreaker Official Banner" width="100%" />
+</p>
+
+<p align="center">
+  <img src="assets/logo.jpg" alt="Vaultbreaker Logo" width="180" />
+</p>
+
+<p align="center">
+  <strong>UNLOCK &bull; ACCESS &bull; OWN</strong><br />
+  <em>The Next Generation of Onchain Access for Autonomous AI Agents</em>
+</p>
+
+---
+
 > **Vaultbreaker** is a scoped-capability broker that enables autonomous AI agents to pay for metered Web3 APIs and services without ever touching a raw private key or unencrypted credential. Powered by **Ledger hardware seed encryption** and **Hedera on-chain budget enforcement + HCS audit trails**, Vaultbreaker turns dangerous all-or-nothing wallet authority into narrow, expiring, revocable, and spend-limited capability objects enforced on-chain in real time.
 
 ---
