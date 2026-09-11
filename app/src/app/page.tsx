@@ -52,34 +52,34 @@ export default function Home() {
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-6 md:p-8 space-y-8">
         {/* Official Vaultbreaker Cover Banner Hero Section */}
-        <div className="relative rounded-3xl overflow-hidden border border-slate-200/90 shadow-sm bg-white group">
+        <div className="relative rounded-3xl overflow-hidden border border-slate-200 shadow-md bg-white group">
           <div className="relative w-full h-56 md:h-64">
             <Image
               src="/banner.png"
-              alt="Vaultbreaker Official Cover Banner"
+              alt="Vaultbreaker Official Light Cover Banner"
               fill
               priority
-              className="object-cover object-center group-hover:scale-101 transition-transform duration-700 opacity-25 mix-blend-multiply"
+              className="object-cover object-center group-hover:scale-101 transition-transform duration-700 opacity-95"
             />
-            {/* Subtle Gradient Fading Overlays */}
-            <div className="absolute inset-0 bg-gradient-to-t from-white via-white/70 to-transparent" />
-            <div className="absolute inset-0 bg-gradient-to-r from-white/95 via-white/80 to-white/60" />
+            {/* Subtle Light Gradient Overlays */}
+            <div className="absolute inset-0 bg-gradient-to-t from-white/90 via-white/30 to-transparent" />
+            <div className="absolute inset-0 bg-gradient-to-r from-white/90 via-transparent to-white/40" />
           </div>
 
           <div className="absolute bottom-6 left-6 right-6 flex flex-col md:flex-row items-start md:items-end justify-between gap-4 z-10">
             <div className="space-y-1.5">
               <div className="flex items-center gap-2">
-                <span className="text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-1 rounded-full bg-sky-50 border border-sky-200/80 text-sky-800 shadow-2xs font-mono">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-1 rounded-full bg-white/95 border border-sky-200 text-sky-800 shadow-xs font-mono backdrop-blur-md">
                   THE NEXT GENERATION OF ONCHAIN ACCESS
                 </span>
-                <span className="text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-1 rounded-full bg-purple-50 border border-purple-200/80 text-purple-800 shadow-2xs font-mono flex items-center gap-1">
+                <span className="text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-1 rounded-full bg-white/95 border border-purple-200 text-purple-800 shadow-xs font-mono backdrop-blur-md flex items-center gap-1">
                   <Sparkles className="w-3 h-3 text-purple-600" /> LEDGER &bull; HEDERA x402
                 </span>
               </div>
-              <h2 className="text-2xl md:text-3xl font-black text-slate-900 font-mono tracking-tight">
+              <h2 className="text-2xl md:text-3xl font-black text-slate-900 font-mono tracking-tight drop-shadow-2xs">
                 UNLOCK &bull; <span className="text-transparent bg-clip-text bg-gradient-to-r from-sky-600 to-violet-600">ACCESS</span> &bull; OWN
               </h2>
-              <p className="text-xs md:text-sm text-slate-600 max-w-2xl font-sans leading-relaxed">
+              <p className="text-xs md:text-sm text-slate-700 max-w-2xl font-sans leading-relaxed font-medium drop-shadow-2xs">
                 Scoped-capability authority objects protecting settlement credentials via Ledger seed hardware enclave and enforcing micropayment spend limits on-chain in real time.
               </p>
             </div>
@@ -88,13 +88,13 @@ export default function Home() {
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setActiveTab("developer")}
-                className="px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs transition-all shadow-md shadow-sky-600/15 flex items-center gap-1.5"
+                className="px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs transition-all shadow-md shadow-sky-600/20 flex items-center gap-1.5"
               >
                 Register Policy <ArrowRight className="w-3.5 h-3.5" />
               </button>
               <button
                 onClick={() => setActiveTab("agent")}
-                className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-50 text-slate-900 border border-slate-200 font-bold text-xs transition-all shadow-xs flex items-center gap-1.5"
+                className="px-4 py-2.5 rounded-xl bg-white hover:bg-slate-50 text-slate-900 border border-slate-300 font-bold text-xs transition-all shadow-xs flex items-center gap-1.5"
               >
                 <Cpu className="w-3.5 h-3.5 text-purple-600" /> Run Agent Terminal
               </button>
@@ -119,7 +119,7 @@ export default function Home() {
         {activeTab === "audit" && <AuditFeedTimeline />}
       </main>
 
-      <footer className="border-t border-slate-200/80 bg-white/70 backdrop-blur-md p-6 text-center text-xs text-slate-500 font-mono space-y-2">
+      <footer className="border-t border-slate-200/80 bg-white/80 backdrop-blur-md p-6 text-center text-xs text-slate-500 font-mono space-y-2">
         <div className="flex items-center justify-center gap-4 text-[11px] text-slate-700 font-bold uppercase tracking-wider">
           <span>AI AGENTS</span> &bull; <span>ONCHAIN FINANCE</span> &bull; <span>REAL SERVICES</span> &bull; <span>VERIFIED IDENTITY</span>
         </div>
