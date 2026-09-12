@@ -56,7 +56,17 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] dark:bg-[#080c14] text-slate-900 dark:text-slate-100 flex flex-col selection:bg-sky-500 selection:text-white transition-colors duration-300">
+    <div className="min-h-screen flex flex-col selection:bg-sky-500 selection:text-white transition-colors duration-300"
+      style={darkMode ? {
+        backgroundColor: "#080c14",
+        backgroundImage: "radial-gradient(at 10% 5%, rgba(56,189,248,0.06) 0px, transparent 50%), radial-gradient(at 90% 15%, rgba(147,51,234,0.07) 0px, transparent 50%), radial-gradient(at 50% 85%, rgba(2,132,199,0.05) 0px, transparent 50%)",
+        color: "#e2e8f0",
+      } : {
+        backgroundColor: "#f8fafc",
+        backgroundImage: "radial-gradient(at 10% 5%, rgba(56,189,248,0.07) 0px, transparent 50%), radial-gradient(at 90% 15%, rgba(147,51,234,0.05) 0px, transparent 50%), radial-gradient(at 50% 85%, rgba(2,132,199,0.04) 0px, transparent 50%)",
+        color: "#0f172a",
+      }}
+    >
       <Navbar
         keyringStatus={keyringStatus}
         activeTab={activeTab}
