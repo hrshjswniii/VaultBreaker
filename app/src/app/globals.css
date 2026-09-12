@@ -3,7 +3,7 @@
 @layer base {
   body {
     background-color: #f8fafc;
-    background-image: 
+    background-image:
       radial-gradient(at 10% 5%, rgba(56, 189, 248, 0.07) 0px, transparent 50%),
       radial-gradient(at 90% 15%, rgba(147, 51, 234, 0.05) 0px, transparent 50%),
       radial-gradient(at 50% 85%, rgba(2, 132, 199, 0.04) 0px, transparent 50%);
@@ -11,9 +11,20 @@
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
     min-height: 100vh;
     overflow-x: hidden;
+    transition: background-color 0.3s, color 0.3s;
+  }
+
+  .dark body {
+    background-color: #080c14;
+    background-image:
+      radial-gradient(at 10% 5%, rgba(56, 189, 248, 0.06) 0px, transparent 50%),
+      radial-gradient(at 90% 15%, rgba(147, 51, 234, 0.07) 0px, transparent 50%),
+      radial-gradient(at 50% 85%, rgba(2, 132, 199, 0.05) 0px, transparent 50%);
+    color: #e2e8f0;
   }
 }
 
+/* Light mode cards */
 .glass-card {
   background: #ffffff;
   border: 1px solid rgba(226, 232, 240, 0.9);
@@ -32,27 +43,41 @@
   box-shadow: 0 12px 35px -5px rgba(225, 29, 72, 0.12), 0 4px 12px -2px rgba(225, 29, 72, 0.08);
 }
 
+/* Dark mode cards */
+.dark .glass-card {
+  background: #0f172a;
+  border: 1px solid rgba(51, 65, 85, 0.8);
+  box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.3), 0 2px 6px -1px rgba(0, 0, 0, 0.2);
+}
+
+.dark .glass-card-glow {
+  background: linear-gradient(135deg, #0f172a 0%, #0c1a2e 50%, #130f23 100%);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  box-shadow: 0 10px 30px -5px rgba(2, 132, 199, 0.15), 0 4px 12px -2px rgba(147, 51, 234, 0.1);
+}
+
+.dark .glass-card-rejection {
+  background: linear-gradient(135deg, #0f172a 0%, #1a0a0e 60%, #200d12 100%);
+  border: 1px solid rgba(244, 63, 94, 0.4);
+  box-shadow: 0 12px 35px -5px rgba(225, 29, 72, 0.2), 0 4px 12px -2px rgba(225, 29, 72, 0.15);
+}
+
 .neon-gradient-text {
   background: linear-gradient(135deg, #0f172a 0%, #0284c7 50%, #7c3aed 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-.neon-text-cyan {
-  color: #0284c7;
+.dark .neon-gradient-text {
+  background: linear-gradient(135deg, #e2e8f0 0%, #38bdf8 50%, #a78bfa 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
-.neon-text-purple {
-  color: #7c3aed;
-}
-
-.neon-text-green {
-  color: #059669;
-}
-
-.neon-text-red {
-  color: #dc2626;
-}
+.neon-text-cyan { color: #0284c7; }
+.neon-text-purple { color: #7c3aed; }
+.neon-text-green { color: #059669; }
+.neon-text-red { color: #dc2626; }
 
 @keyframes subtlePulse {
   0%, 100% { opacity: 0.85; }
