@@ -1,47 +1,65 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import Image from "next/image";
-import { Cpu, KeyRound, Radio, Moon, Sun } from "lucide-react";
+import { Cpu, KeyRound, Radio, Moon, Sun, LayoutDashboard, Code, ShieldCheck, Menu, X } from "lucide-react";
 import { KeyRingStatus } from "@/lib/api";
 
 interface NavbarProps {
   keyringStatus: KeyRingStatus | null;
-  activeTab: "developer" | "agent" | "audit";
-  setActiveTab: (tab: "developer" | "agent" | "audit") => void;
+  activeTab: "dashboard" | "developer" | "agent" | "audit";
+  setActiveTab: (tab: "dashboard" | "developer" | "agent" | "audit") => void;
   darkMode: boolean;
   toggleDarkMode: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ keyringStatus, activeTab, setActiveTab, darkMode, toggleDarkMode }) => {
+export const Navbar: React.FC<NavbarProps> = ({
+  keyringStatus,
+  activeTab,
+  setActiveTab,
+  darkMode,
+  toggleDarkMode,
+}) => {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  const handleNavClick = (tab: "dashboard" | "developer" | "agent" | "audit") => {
+    setActiveTab(tab);
+    setMobileMenuOpen(false);
+  };
+
   return (
-    <header className="border-b border-slate-200/80 dark:border-slate-700/80 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl sticky top-0 z-50 px-6 py-3.5 shadow-xs">
-      <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
-        {/* Logo */}
-        <div className="flex items-center gap-3.5 cursor-pointer" onClick={() => setActiveTab("developer")}>
-          <div className="relative w-10 h-10 rounded-xl overflow-hidden border border-sky-200 dark:border-sky-800 shadow-sm group bg-slate-50 dark:bg-slate-800">
-            <Image src="/logo.jpg" alt="Vaultbreaker Logo" fill className="object-cover group-hover:scale-105 transition-transform duration-300" />
+    <header className="border-b border-slate-200/80 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl sticky top-0 z-50 px-4 sm:px-6 py-3 shadow-2xs">
+      <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+        {/* Brand Logo */}
+        <div className="flex items-center gap-3.5 cursor-pointer" onClick={() => handleNavClick("dashboard")}>
+          <div className="relative w-10 h-10 rounded-xl overflow-hidden border border-sky-200 dark:border-sky-800 shadow-sm group bg-slate-50 dark:bg-slate-800 shrink-0">
+            <Image
+              src="/logo.jpg"
+              alt="Vaultbreaker Logo"
+              fill
+              className="object-cover group-hover:scale-105 transition-transform duration-300"
+            />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-extrabold tracking-tight text-slate-900 dark:text-white font-mono">
                 VAULT<span className="text-transparent bg-clip-text bg-gradient-to-r from-sky-600 to-violet-600">BREAKER</span>
               </h1>
-              <span className="text-[10px] uppercase font-mono px-2.5 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950 border border-indigo-200/80 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 font-bold">
-                ETHOnline 2026
+              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950 border border-indigo-200/80 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 font-bold hidden sm:inline">
+                2.0 ARCHITECTURE
               </span>
             </div>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tracking-tight flex items-center gap-1.5">
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tracking-tight hidden sm:flex items-center gap-1.5">
               <span>UNLOCK</span> &bull; <span>ACCESS</span> &bull; <span>OWN</span>
-              <span className="text-slate-300 dark:text-slate-600">|</span>
+              <span className="text-slate-300 dark:text-slate-700">|</span>
               <span className="text-sky-700 dark:text-sky-400 font-semibold">Ledger Seed + Hedera x402</span>
             </p>
           </div>
         </div>
 
-        {/* Sponsor Badges */}
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-50/90 dark:bg-sky-950/60 border border-sky-200/80 dark:border-sky-800 text-sky-900 dark:text-sky-300 text-xs font-mono shadow-2xs">
+        {/* Sponsor Badges (Desktop) */}
+        <div className="hidden lg:flex items-center gap-2.5">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-sky-50/90 dark:bg-sky-950/60 border border-sky-200/80 dark:border-sky-800 text-sky-900 dark:text-sky-300 text-xs font-mono shadow-2xs">
             <KeyRound className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
             <span className="text-slate-500 dark:text-slate-400">LEDGER:</span>
             <span className="font-bold text-slate-900 dark:text-white">
@@ -49,59 +67,142 @@ export const Navbar: React.FC<NavbarProps> = ({ keyringStatus, activeTab, setAct
             </span>
           </div>
 
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-50/90 dark:bg-purple-950/60 border border-purple-200/80 dark:border-purple-800 text-purple-900 dark:text-purple-300 text-xs font-mono shadow-2xs">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-50/90 dark:bg-purple-950/60 border border-purple-200/80 dark:border-purple-800 text-purple-900 dark:text-purple-300 text-xs font-mono shadow-2xs">
             <Radio className="w-3.5 h-3.5 animate-pulse text-purple-600 dark:text-purple-400" />
             <span className="text-slate-500 dark:text-slate-400">HEDERA:</span>
             <span className="font-bold text-slate-900 dark:text-white">Testnet (296)</span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* Nav Tabs */}
-          <div className="flex items-center gap-1 p-1 bg-slate-100/90 dark:bg-slate-800/90 rounded-xl border border-slate-200/80 dark:border-slate-700">
+        {/* Desktop Navigation Tabs */}
+        <div className="hidden md:flex items-center gap-2">
+          <div className="flex items-center gap-1 p-1 bg-slate-100/90 dark:bg-slate-800/90 rounded-2xl border border-slate-200/80 dark:border-slate-700">
             <button
-              onClick={() => setActiveTab("developer")}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+              onClick={() => handleNavClick("dashboard")}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                activeTab === "dashboard"
+                  ? "bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm border border-slate-200/80 dark:border-slate-600"
+                  : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
+              }`}
+            >
+              <LayoutDashboard className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+              Dashboard
+            </button>
+
+            <button
+              onClick={() => handleNavClick("developer")}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
                 activeTab === "developer"
                   ? "bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm border border-slate-200/80 dark:border-slate-600"
                   : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
               }`}
             >
+              <Code className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
               Developer Console
             </button>
+
             <button
-              onClick={() => setActiveTab("agent")}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+              onClick={() => handleNavClick("agent")}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
                 activeTab === "agent"
                   ? "bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm border border-slate-200/80 dark:border-slate-600"
                   : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
               }`}
             >
-              <Cpu className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
-              Agent Console (x402)
+              <Cpu className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+              Agent Console
             </button>
+
             <button
-              onClick={() => setActiveTab("audit")}
-              className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${
+              onClick={() => handleNavClick("audit")}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
                 activeTab === "audit"
                   ? "bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-sm border border-slate-200/80 dark:border-slate-600"
                   : "text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"
               }`}
             >
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
               HCS Audit Trail
             </button>
           </div>
 
-          {/* Dark Mode Toggle */}
+          {/* Theme Toggle */}
           <button
             onClick={toggleDarkMode}
-            className="p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-all shadow-xs"
+            className="p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 transition-all shadow-xs cursor-pointer"
             aria-label="Toggle dark mode"
           >
             {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-500" />}
           </button>
         </div>
+
+        {/* Mobile Menu Button */}
+        <div className="flex items-center gap-2 md:hidden">
+          <button
+            onClick={toggleDarkMode}
+            className="p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300"
+            aria-label="Toggle dark mode"
+          >
+            {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-500" />}
+          </button>
+
+          <button
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            className="p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200"
+          >
+            {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </button>
+        </div>
       </div>
+
+      {/* Mobile Menu Drawer */}
+      {mobileMenuOpen && (
+        <div className="md:hidden border-t border-slate-200 dark:border-slate-800 mt-3 pt-3 space-y-2 animate-in slide-in-from-top-2 duration-200">
+          <button
+            onClick={() => handleNavClick("dashboard")}
+            className={`w-full p-3 rounded-xl text-xs font-bold text-left flex items-center gap-2 ${
+              activeTab === "dashboard"
+                ? "bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800"
+                : "text-slate-700 dark:text-slate-300"
+            }`}
+          >
+            <LayoutDashboard className="w-4 h-4" /> Overview Dashboard
+          </button>
+
+          <button
+            onClick={() => handleNavClick("developer")}
+            className={`w-full p-3 rounded-xl text-xs font-bold text-left flex items-center gap-2 ${
+              activeTab === "developer"
+                ? "bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800"
+                : "text-slate-700 dark:text-slate-300"
+            }`}
+          >
+            <Code className="w-4 h-4" /> Developer Console
+          </button>
+
+          <button
+            onClick={() => handleNavClick("agent")}
+            className={`w-full p-3 rounded-xl text-xs font-bold text-left flex items-center gap-2 ${
+              activeTab === "agent"
+                ? "bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800"
+                : "text-slate-700 dark:text-slate-300"
+            }`}
+          >
+            <Cpu className="w-4 h-4" /> Agent Console (x402)
+          </button>
+
+          <button
+            onClick={() => handleNavClick("audit")}
+            className={`w-full p-3 rounded-xl text-xs font-bold text-left flex items-center gap-2 ${
+              activeTab === "audit"
+                ? "bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800"
+                : "text-slate-700 dark:text-slate-300"
+            }`}
+          >
+            <ShieldCheck className="w-4 h-4" /> HCS Audit Trail
+          </button>
+        </div>
+      )}
     </header>
   );
 };

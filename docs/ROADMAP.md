@@ -6,13 +6,13 @@ This roadmap defines the multi-phase evolution of Vaultbreaker from a hackathon 
 
 ## Roadmap Phases
 
-- [x] **PHASE 0 — Audit & Baseline** `[CURRENT - COMPLETED]`
+- [x] **PHASE 0 — Audit & Baseline** `[COMPLETED]`
   - Deep repository audit, system flow tracing, technical debt cataloging, test execution, security review, and phase baseline documentation.
 
-- [ ] **PHASE 1 — Product Architecture**
+- [x] **PHASE 1 — Product Architecture** `[COMPLETED]`
   - Define core data models, persistent database schema (SQLite/PostgreSQL/Redis), broker-to-contract transaction relayer design, and API authentication layer.
 
-- [ ] **PHASE 2 — UI/UX Rebuild**
+- [x] **PHASE 2 — UI/UX Rebuild** `[COMPLETED]`
   - Redesign design system, resolve offline font fetching issues, establish responsive layouts, theme tokens, and component library.
 
 - [ ] **PHASE 3 — Dashboard**
