@@ -2,10 +2,14 @@
 
 import React, { useEffect, useState } from "react";
 import Image from "next/image";
-import { Navbar } from "@/components/Navbar";
+import { Navbar, NavTab } from "@/components/Navbar";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { DashboardView } from "@/components/DashboardView";
-import { DeveloperConsole } from "@/components/DeveloperConsole";
+import { AgentsView } from "@/components/AgentsView";
+import { CapabilitiesView } from "@/components/CapabilitiesView";
+import { PoliciesView } from "@/components/PoliciesView";
+import { ServicesView } from "@/components/ServicesView";
+import { PaymentsView } from "@/components/PaymentsView";
 import { AgentConsole } from "@/components/AgentConsole";
 import { AuditFeedTimeline } from "@/components/AuditFeedTimeline";
 import {
@@ -13,20 +17,29 @@ import {
   Capability,
   KeyRingStatus,
   HCSAuditEvent,
+  Agent,
+  ServiceItem,
+  PaymentAttempt,
   fetchHealth,
   fetchPolicies,
   fetchCapabilities,
-  fetchAuditFeed
+  fetchAuditFeed,
+  fetchAgents,
+  fetchServices,
+  fetchPaymentAttempts
 } from "@/lib/api";
-import { Cpu, Sparkles, ArrowRight, ShieldCheck } from "lucide-react";
+import { Cpu, Sparkles, ArrowRight } from "lucide-react";
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"dashboard" | "developer" | "agent" | "audit">("dashboard");
+  const [activeTab, setActiveTab] = useState<NavTab>("dashboard");
   const [keyringStatus, setKeyringStatus] = useState<KeyRingStatus | null>(null);
   const [isBrokerOnline, setIsBrokerOnline] = useState<boolean>(false);
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
   const [auditFeed, setAuditFeed] = useState<HCSAuditEvent[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [services, setServices] = useState<ServiceItem[]>([]);
+  const [payments, setPayments] = useState<PaymentAttempt[]>([]);
   const [selectedCapability, setSelectedCapability] = useState<Capability | null>(null);
   const [darkMode, setDarkMode] = useState<boolean>(true);
 
@@ -44,7 +57,7 @@ export default function Home() {
       const health = await fetchHealth();
       setKeyringStatus(health.keyring);
       setIsBrokerOnline(health.service !== "Vaultbreaker Capability Broker (Demo Mode)");
-      
+
       const pols = await fetchPolicies();
       setPolicies(pols);
 
@@ -53,6 +66,15 @@ export default function Home() {
 
       const feed = await fetchAuditFeed();
       setAuditFeed(feed);
+
+      const agts = await fetchAgents();
+      setAgents(agts);
+
+      const srvs = await fetchServices();
+      setServices(srvs);
+
+      const pays = await fetchPaymentAttempts();
+      setPayments(pays);
 
       setSelectedCapability((prev) => {
         if (!prev) return caps.length > 0 ? caps[0] : null;
@@ -82,7 +104,7 @@ export default function Home() {
       setSelectedCapability(matching);
       setActiveTab("agent");
     } else {
-      setActiveTab("developer");
+      setActiveTab("capabilities");
     }
   };
 
@@ -118,7 +140,7 @@ export default function Home() {
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 md:p-8 space-y-8">
         {/* Hero Cover Banner */}
         <div className="relative rounded-3xl overflow-hidden border border-slate-200 dark:border-slate-800 shadow-md bg-white dark:bg-slate-900 group">
-          <div className="relative w-full h-52 sm:h-60 md:h-64">
+          <div className="relative w-full h-48 sm:h-56 md:h-60">
             <Image
               src={darkMode ? "/banner-dark.png" : "/banner.png"}
               alt="Vaultbreaker Cover Banner"
@@ -150,7 +172,7 @@ export default function Home() {
                     darkMode ? "bg-slate-900/95 border-sky-700 text-sky-300" : "bg-white/95 border-sky-200 text-sky-800"
                   }`}
                 >
-                  VAULTBREAKER 2.0 REBUILD
+                  VAULTBREAKER 2.0 PRODUCT
                 </span>
                 <span
                   className={`text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-1 rounded-full border font-mono backdrop-blur-md shadow-xs flex items-center gap-1 ${
@@ -172,14 +194,14 @@ export default function Home() {
 
             <div className="flex items-center gap-2 shrink-0">
               <button
-                onClick={() => setActiveTab("developer")}
-                className="px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs transition-all shadow-md shadow-sky-600/20 flex items-center gap-1.5 cursor-pointer"
+                onClick={() => setActiveTab("policies")}
+                className="px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs transition-all shadow-md shadow-sky-600/20 flex items-center gap-1.5 cursor-pointer font-mono"
               >
-                Register Policy <ArrowRight className="w-3.5 h-3.5" />
+                Inspect Policies <ArrowRight className="w-3.5 h-3.5" />
               </button>
               <button
                 onClick={() => setActiveTab("agent")}
-                className={`px-4 py-2.5 rounded-xl border font-bold text-xs transition-all shadow-xs flex items-center gap-1.5 cursor-pointer ${
+                className={`px-4 py-2.5 rounded-xl border font-bold text-xs transition-all shadow-xs flex items-center gap-1.5 cursor-pointer font-mono ${
                   darkMode
                     ? "bg-slate-800 hover:bg-slate-700 text-white border-slate-600"
                     : "bg-white hover:bg-slate-50 text-slate-900 border-slate-300"
@@ -191,7 +213,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Dynamic Tab Views */}
+        {/* Dynamic Product Page Navigation */}
         {activeTab === "dashboard" && (
           <DashboardView
             policies={policies}
@@ -199,17 +221,52 @@ export default function Home() {
             auditFeed={auditFeed}
             keyringStatus={keyringStatus}
             isBrokerOnline={isBrokerOnline}
-            onNavigate={setActiveTab}
+            onNavigate={(tab) => setActiveTab(tab as NavTab)}
             onIssueTokenClick={handleIssueTokenClick}
           />
         )}
 
-        {activeTab === "developer" && (
-          <DeveloperConsole
+        {activeTab === "agents" && (
+          <AgentsView
+            agents={agents}
+            capabilities={capabilities}
+            payments={payments}
+            onNavigate={(tab) => setActiveTab(tab as NavTab)}
+          />
+        )}
+
+        {activeTab === "capabilities" && (
+          <CapabilitiesView
+            capabilities={capabilities}
+            policies={policies}
+            onRefresh={loadData}
+            onNavigate={(tab) => setActiveTab(tab as NavTab)}
+            onSelectCapabilityForAgent={handleSelectCapability}
+          />
+        )}
+
+        {activeTab === "policies" && (
+          <PoliciesView
             policies={policies}
             capabilities={capabilities}
-            onRefresh={loadData}
-            onSelectCapabilityForAgent={handleSelectCapability}
+            payments={payments}
+            onNavigate={(tab) => setActiveTab(tab as NavTab)}
+            onIssueTokenForPolicy={handleIssueTokenClick}
+          />
+        )}
+
+        {activeTab === "services" && (
+          <ServicesView
+            services={services}
+            payments={payments}
+            onNavigate={(tab) => setActiveTab(tab as NavTab)}
+          />
+        )}
+
+        {activeTab === "payments" && (
+          <PaymentsView
+            payments={payments}
+            onNavigate={(tab) => setActiveTab(tab as NavTab)}
           />
         )}
 
