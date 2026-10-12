@@ -2,8 +2,19 @@
 import { Client, TopicMessageSubmitTransaction, TopicId, PrivateKey, AccountId } from "@hashgraph/sdk";
 
 export interface HCSAuditEvent {
-  type: "CAPABILITY_ISSUED" | "CAPABILITY_SPENT" | "CAPABILITY_REJECTED" | "CAPABILITY_REVOKED";
-  capId: string;
+  type:
+    | "CAPABILITY_ISSUED"
+    | "CAPABILITY_SPENT"
+    | "CAPABILITY_REJECTED"
+    | "CAPABILITY_REVOKED"
+    | "AGENT_REGISTERED"
+    | "AGENT_STATUS_CHANGED"
+    | "AGENT_AUTHORIZATION_DENIED";
+  capId?: string;
+  agentId?: string;
+  agentName?: string;
+  previousStatus?: string;
+  newStatus?: string;
   service?: string;
   amount?: number;
   budgetRemaining?: number;
@@ -49,7 +60,8 @@ export class HederaHCSLogger {
     this.inMemoryAuditFeed.unshift(event);
 
     if (!this.client || !this.topicId || this.topicId === "0.0.654321") {
-      console.log(`[HCS Audit Log] [${event.type}] capId=${event.capId.slice(0, 10)}... amount=${event.amount ?? 0} (Saved to feed)`);
+      const targetIdentifier = event.capId ? `capId=${event.capId.slice(0, 10)}...` : `agentId=${event.agentId || "N/A"}`;
+      console.log(`[HCS Audit Log] [${event.type}] ${targetIdentifier} amount=${event.amount ?? 0} (Saved to feed)`);
       return {
         success: true,
         message: "Logged to in-memory Hedera audit feed (Local mode)",

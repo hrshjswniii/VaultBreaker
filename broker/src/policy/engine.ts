@@ -16,6 +16,7 @@ export interface SpendPolicy {
 
 export interface IssuedCapability {
   capId: string;
+  agentId: string;
   policyId: string;
   policyHash: string;
   serviceAddress: string;
@@ -82,13 +83,15 @@ export class PolicyEngine {
     policyId: string,
     requestedBudget?: number,
     requestedTtlSeconds?: number,
-    settlementCredentialSecret?: string
+    settlementCredentialSecret?: string,
+    agentId?: string
   ): Promise<IssuedCapability> {
     const policy = this.policies.get(policyId);
     if (!policy) {
       throw new Error(`Policy ${policyId} not found`);
     }
 
+    const targetAgentId = agentId || "agent_alpha";
     const budgetTotal = Math.min(requestedBudget || policy.dailyBudget, policy.dailyBudget);
     const ttl = Math.min(requestedTtlSeconds || policy.ttlSeconds, policy.ttlSeconds);
     const expiry = Math.floor(Date.now() / 1000) + ttl;
@@ -123,6 +126,7 @@ export class PolicyEngine {
     const token = jwt.sign(
       {
         capId,
+        agentId: targetAgentId,
         policyId: policy.id,
         policyHash,
         service: policy.serviceAddress,
@@ -136,6 +140,7 @@ export class PolicyEngine {
 
     const capability: IssuedCapability = {
       capId,
+      agentId: targetAgentId,
       policyId: policy.id,
       policyHash,
       serviceAddress: policy.serviceAddress,
