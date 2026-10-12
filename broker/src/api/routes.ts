@@ -2,12 +2,14 @@ import { Router, Request, Response } from "express";
 import { LedgerKeyRing } from "../ledger/keyring.js";
 import { HederaHCSLogger } from "../hedera/hcs.js";
 import { PolicyEngine } from "../policy/engine.js";
+import { AgentRegistry, AgentStatus } from "../agent/registry.js";
 import { ethers } from "ethers";
 
 export function createApiRouter(
   keyring: LedgerKeyRing,
   hcsLogger: HederaHCSLogger,
-  policyEngine: PolicyEngine
+  policyEngine: PolicyEngine,
+  agentRegistry: AgentRegistry
 ): Router {
   const router = Router();
 
@@ -43,7 +45,96 @@ export function createApiRouter(
     });
   });
 
-  // 2. Policies API
+  // 2. Agents API (Phase 4 Authoritative Lifecycle Management)
+  router.get("/agents", (req: Request, res: Response) => {
+    res.json(agentRegistry.listAgents());
+  });
+
+  router.get("/agents/:id", (req: Request, res: Response) => {
+    const { id } = req.params;
+    const agent = agentRegistry.getAgent(id);
+
+    if (!agent) {
+      return res.status(404).json({
+        error: "AGENT_NOT_FOUND",
+        message: `Agent with ID '${id}' not found in registry.`,
+      });
+    }
+
+    // Attach capabilities issued to this agent
+    const capabilities = policyEngine.listCapabilities().filter((c) => c.agentId === id);
+
+    res.json({
+      ...agent,
+      capabilities,
+    });
+  });
+
+  router.post("/agents", async (req: Request, res: Response) => {
+    try {
+      const { name, description, walletAddress } = req.body;
+      const agent = agentRegistry.createAgent({ name, description, walletAddress });
+
+      // Log AGENT_REGISTERED to HCS Audit Trail
+      await hcsLogger.logAuditEvent({
+        type: "AGENT_REGISTERED",
+        agentId: agent.id,
+        agentName: agent.name,
+        timestamp: new Date().toISOString(),
+      });
+
+      res.status(201).json(agent);
+    } catch (err: any) {
+      const message = err.message || "Unknown error";
+      if (message.startsWith("CONFLICT:")) {
+        return res.status(409).json({ error: "CONFLICT", message });
+      }
+      if (message.startsWith("VALIDATION_ERROR:") || message.startsWith("MALFORMED_INPUT:")) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message });
+      }
+      res.status(500).json({ error: "INTERNAL_ERROR", message });
+    }
+  });
+
+  router.post("/agents/:id/transition", async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { targetStatus, reason } = req.body;
+
+      if (!targetStatus) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "'targetStatus' is required ('ACTIVE' | 'SUSPENDED' | 'REVOKED')",
+        });
+      }
+
+      const result = agentRegistry.transitionStatus(id, targetStatus as AgentStatus, reason);
+
+      // Log AGENT_STATUS_CHANGED to HCS Audit Trail
+      await hcsLogger.logAuditEvent({
+        type: "AGENT_STATUS_CHANGED",
+        agentId: result.agent.id,
+        agentName: result.agent.name,
+        previousStatus: result.previousStatus,
+        newStatus: result.agent.status,
+        reason: reason || `Transitioned from ${result.previousStatus} to ${result.agent.status}`,
+        timestamp: new Date().toISOString(),
+      });
+
+      res.json(result);
+    } catch (err: any) {
+      const message = err.message || "Unknown error";
+      if (message.startsWith("NOT_FOUND:")) {
+        return res.status(404).json({ error: "NOT_FOUND", message });
+      }
+      if (message.startsWith("INVALID_TRANSITION:")) {
+        return res.status(400).json({ error: "INVALID_TRANSITION", message });
+      }
+      res.status(400).json({ error: "BAD_REQUEST", message });
+    }
+  });
+
+  // 3. Policies API
   router.get("/policies", (req: Request, res: Response) => {
     res.json(policyEngine.listPolicies());
   });
@@ -65,22 +156,34 @@ export function createApiRouter(
     }
   });
 
-  // 3. Issue Capability Token (Ledger seed protected)
+  // 4. Issue Capability Token (Ledger seed protected & bound to Agent)
   router.post("/capabilities/issue", async (req: Request, res: Response) => {
     try {
-      const { policyId, requestedBudget, requestedTtlSeconds, settlementCredentialSecret } = req.body;
+      const { policyId, requestedBudget, requestedTtlSeconds, settlementCredentialSecret, agentId } = req.body;
+
+      if (agentId) {
+        const agent = agentRegistry.getAgent(agentId);
+        if (!agent) {
+          return res.status(404).json({
+            error: "AGENT_NOT_FOUND",
+            message: `Cannot issue capability: Agent '${agentId}' not found.`,
+          });
+        }
+      }
 
       const capability = await policyEngine.issueCapability(
         policyId,
         requestedBudget ? Number(requestedBudget) : undefined,
         requestedTtlSeconds ? Number(requestedTtlSeconds) : undefined,
-        settlementCredentialSecret
+        settlementCredentialSecret,
+        agentId
       );
 
       // Submit HCS Audit Event to Hedera
       await hcsLogger.logAuditEvent({
         type: "CAPABILITY_ISSUED",
         capId: capability.capId,
+        agentId: capability.agentId,
         service: capability.serviceAddress,
         amount: 0,
         budgetRemaining: capability.budgetTotal,
@@ -94,7 +197,7 @@ export function createApiRouter(
     }
   });
 
-  // 4. Inspect Capability
+  // 5. Inspect Capability
   router.get("/capabilities", (req: Request, res: Response) => {
     res.json(policyEngine.listCapabilities());
   });
@@ -130,7 +233,7 @@ export function createApiRouter(
     });
   });
 
-  // 5. Revoke Capability
+  // 6. Revoke Capability
   router.post("/capabilities/revoke", async (req: Request, res: Response) => {
     try {
       const { capId } = req.body;
@@ -152,10 +255,10 @@ export function createApiRouter(
     }
   });
 
-  // 6. x402-Gated Metered Service Endpoint (e.g. AI Text Summarizer / Compute)
+  // 7. x402-Gated Metered Service Endpoint with Server-Side Agent Lifecycle Enforcement
   router.post("/metered-service", async (req: Request, res: Response) => {
     const authHeader = req.headers["x-capability-token"] as string;
-    const paymentAmountHeader = req.headers["x-payment-amount"] as string || "10";
+    const paymentAmountHeader = (req.headers["x-payment-amount"] as string) || "10";
     const amountToSpend = Number(paymentAmountHeader);
 
     if (!authHeader) {
@@ -179,11 +282,89 @@ export function createApiRouter(
       return res.status(404).json({ error: "CAPABILITY_NOT_FOUND", message: "Capability record does not exist." });
     }
 
-    // Check Revocation
+    // Resolve authoritative Agent identifier (from decoded token or capability object)
+    const agentId = decoded.agentId || capability.agentId || "agent_alpha";
+    const agent = agentRegistry.getAgent(agentId);
+
+    // =========================================================================
+    // AUTHORITATIVE AGENT LIFECYCLE ENFORCEMENT GATE
+    // Evaluated BEFORE key decryption, spend execution, or contract invocation.
+    // =========================================================================
+    if (!agent) {
+      await hcsLogger.logAuditEvent({
+        type: "AGENT_AUTHORIZATION_DENIED",
+        capId,
+        agentId,
+        amount: amountToSpend,
+        reason: "Agent record does not exist in registry",
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        error: "AGENT_NOT_FOUND",
+        capId,
+        agentId,
+        message: "Authorization Gate: Associated agent identity not found. Execution failed closed.",
+      });
+    }
+
+    if (agent.status === "SUSPENDED") {
+      agentRegistry.recordActivity(agentId, amountToSpend, false);
+      await hcsLogger.logAuditEvent({
+        type: "AGENT_AUTHORIZATION_DENIED",
+        capId,
+        agentId,
+        agentName: agent.name,
+        amount: amountToSpend,
+        reason: "Agent is currently SUSPENDED by administrator",
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        error: "AGENT_SUSPENDED",
+        capId,
+        agentId,
+        status: "SUSPENDED",
+        message: `Authorization Gate: Agent '${agent.name}' (${agentId}) is SUSPENDED. All protected metered requests are denied.`,
+      });
+    }
+
+    if (agent.status === "REVOKED") {
+      agentRegistry.recordActivity(agentId, amountToSpend, false);
+      await hcsLogger.logAuditEvent({
+        type: "AGENT_AUTHORIZATION_DENIED",
+        capId,
+        agentId,
+        agentName: agent.name,
+        amount: amountToSpend,
+        reason: "Agent authority permanently REVOKED",
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        error: "AGENT_REVOKED",
+        capId,
+        agentId,
+        status: "REVOKED",
+        message: `Authorization Gate: Agent '${agent.name}' (${agentId}) is REVOKED. Execution permanently denied.`,
+      });
+    }
+
+    if (agent.status !== "ACTIVE") {
+      // Unknown or non-canonical status: fail closed
+      agentRegistry.recordActivity(agentId, amountToSpend, false);
+      return res.status(403).json({
+        error: "AGENT_INVALID_STATE",
+        capId,
+        agentId,
+        message: "Authorization Gate: Agent status is not approved for execution. Failed closed.",
+      });
+    }
+
+    // Check Capability Revocation
     if (capability.revoked) {
+      agentRegistry.recordActivity(agentId, amountToSpend, false);
       await hcsLogger.logAuditEvent({
         type: "CAPABILITY_REJECTED",
         capId,
+        agentId,
         amount: amountToSpend,
         reason: "Capability Revoked by Issuer",
         timestamp: new Date().toISOString(),
@@ -198,9 +379,11 @@ export function createApiRouter(
     // Check Expiry
     const nowSec = Math.floor(Date.now() / 1000);
     if (nowSec >= capability.expiry) {
+      agentRegistry.recordActivity(agentId, amountToSpend, false);
       await hcsLogger.logAuditEvent({
         type: "CAPABILITY_REJECTED",
         capId,
+        agentId,
         amount: amountToSpend,
         reason: "Capability Expired",
         timestamp: new Date().toISOString(),
@@ -214,9 +397,11 @@ export function createApiRouter(
 
     // Check Budget
     if (capability.budgetRemaining < amountToSpend) {
+      agentRegistry.recordActivity(agentId, amountToSpend, false);
       await hcsLogger.logAuditEvent({
         type: "CAPABILITY_REJECTED",
         capId,
+        agentId,
         amount: amountToSpend,
         budgetRemaining: capability.budgetRemaining,
         reason: "Budget Exhausted",
@@ -238,10 +423,14 @@ export function createApiRouter(
     // Decrypt settlement credential in memory using Ledger Key Ring (credential never leaves broker)
     await keyring.decryptCredential(capability.encryptedCredential);
 
+    // Record successful agent activity in registry
+    agentRegistry.recordActivity(agentId, amountToSpend, true);
+
     // Write HCS Audit Event to Hedera Consensus Service
     const hcsResult = await hcsLogger.logAuditEvent({
       type: "CAPABILITY_SPENT",
       capId,
+      agentId,
       service: capability.serviceAddress,
       amount: amountToSpend,
       budgetRemaining: remainingAfterSpend,
@@ -254,6 +443,8 @@ export function createApiRouter(
     res.json({
       status: "SUCCESS",
       capId,
+      agentId,
+      agentStatus: agent.status,
       amountCharged: amountToSpend,
       budgetRemaining: remainingAfterSpend,
       hcsAuditMessage: hcsResult.message,
@@ -267,7 +458,7 @@ export function createApiRouter(
     });
   });
 
-  // 7. Audit Feed for Frontend Timeline
+  // 8. Audit Feed for Frontend Timeline
   router.get("/audit-feed", async (req: Request, res: Response) => {
     const feed = await hcsLogger.getAuditLog();
     res.json(feed);
