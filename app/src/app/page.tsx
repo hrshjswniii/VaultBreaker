@@ -232,6 +232,7 @@ export default function Home() {
             capabilities={capabilities}
             payments={payments}
             onNavigate={(tab) => setActiveTab(tab as NavTab)}
+            onRefresh={loadData}
           />
         )}
 

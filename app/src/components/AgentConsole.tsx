@@ -227,16 +227,20 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({ selectedCapability, 
               </div>
               <div>
                 <h3 className="text-lg md:text-xl font-extrabold text-slate-900 dark:text-white tracking-tight font-mono">
-                  REJECTED ON-CHAIN IN REAL-TIME
+                  {lastResponse?.status === 403
+                    ? "REJECTED BY AGENT LIFECYCLE GATE"
+                    : "REJECTED ON-CHAIN IN REAL-TIME"}
                 </h3>
                 <p className="text-xs text-rose-700 dark:text-rose-400 font-mono font-medium">
-                  Real-Time Enforcement Verified: Cap Limit Exceeded / Token Invalidated
+                  {lastResponse?.status === 403
+                    ? "Server-Side Lifecycle Check: Agent Suspended or Revoked"
+                    : "Real-Time Enforcement Verified: Cap Limit Exceeded / Token Invalidated"}
                 </p>
               </div>
             </div>
 
             <span className="text-xs uppercase font-mono px-3 py-1.5 rounded-full bg-rose-600 text-white font-bold shadow-2xs">
-              HTTP {lastResponse?.status || 402} PAYMENT REQUIRED
+              HTTP {lastResponse?.status || 402} {lastResponse?.status === 403 ? "FORBIDDEN" : "PAYMENT REQUIRED"}
             </span>
           </div>
 

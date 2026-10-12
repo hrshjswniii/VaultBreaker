@@ -25,8 +25,19 @@ export interface Capability {
 }
 
 export interface HCSAuditEvent {
-  type: "CAPABILITY_ISSUED" | "CAPABILITY_SPENT" | "CAPABILITY_REJECTED" | "CAPABILITY_REVOKED";
-  capId: string;
+  type:
+    | "CAPABILITY_ISSUED"
+    | "CAPABILITY_SPENT"
+    | "CAPABILITY_REJECTED"
+    | "CAPABILITY_REVOKED"
+    | "AGENT_REGISTERED"
+    | "AGENT_STATUS_CHANGED"
+    | "AGENT_AUTHORIZATION_DENIED";
+  capId?: string;
+  agentId?: string;
+  agentName?: string;
+  previousStatus?: string;
+  newStatus?: string;
   service?: string;
   amount?: number;
   budgetRemaining?: number;
@@ -44,7 +55,7 @@ export interface KeyRingStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3 Extended Domain Models
+// Phase 3 & 4 Extended Domain Models
 // ---------------------------------------------------------------------------
 
 export interface Agent {
@@ -56,6 +67,8 @@ export interface Agent {
   network: string;
   capabilitiesCount: number;
   totalSpentHbar: number;
+  totalCallsExecuted?: number;
+  totalCallsRejected?: number;
   createdAt: string;
   lastActiveAt: string;
   isDemoFixture: boolean;
@@ -206,6 +219,7 @@ const mockStore = {
     ],
   ]),
   capabilities: new Map<string, Capability>(),
+  agents: new Map<string, Agent>(demoAgents.map((a) => [a.id, { ...a }])),
   auditFeed: [] as HCSAuditEvent[],
   paymentAttempts: [] as PaymentAttempt[],
   brokerOnline: false,
@@ -322,6 +336,98 @@ function mockExecuteMeteredCall(token: string, promptText: string, amount: numbe
   const cap = mockStore.capabilities.get(capId);
   if (!cap) {
     return { status: 404, ok: false, data: { error: "CAPABILITY_NOT_FOUND" } };
+  }
+
+  // Authoritative Agent Lifecycle Check in Mock / Offline Mode
+  const agent = mockStore.agents.get("agent_alpha");
+  if (agent) {
+    if (agent.status === "SUSPENDED") {
+      mockStore.auditFeed.unshift({
+        type: "AGENT_AUTHORIZATION_DENIED",
+        capId,
+        agentId: agent.id,
+        agentName: agent.name,
+        amount,
+        reason: "Agent execution is suspended by administrator",
+        timestamp: nowStr,
+      });
+
+      const suspendedPayment: PaymentAttempt = {
+        id: uid("pay_"),
+        capId,
+        agentId: agent.id,
+        agentName: agent.name,
+        serviceAddress: cap.serviceAddress,
+        serviceName: "Vaultbreaker AI Text Summarizer API",
+        amount,
+        asset: "HBAR",
+        network: "Hedera Testnet (296)",
+        decision: "DENIED",
+        status: "REJECTED",
+        reason: "AGENT_SUSPENDED",
+        evaluationTrace: [
+          { stage: "REQUEST_RECEIVED", status: "PASS", detail: "HTTP POST request parsed", timestamp: nowStr },
+          { stage: "CAPABILITY_RESOLVED", status: "PASS", detail: `Capability resolved for ${agent.name}`, timestamp: nowStr },
+          { stage: "POLICY_EVALUATED", status: "FAIL", detail: `Authorization Gate: Agent '${agent.name}' is currently SUSPENDED. All execution denied.`, timestamp: nowStr },
+        ],
+        timestamp: nowStr,
+        isDemoFixture: true,
+      };
+      mockStore.paymentAttempts.unshift(suspendedPayment);
+
+      return {
+        status: 403,
+        ok: false,
+        data: {
+          error: "AGENT_SUSPENDED",
+          message: `Authorization Gate: Agent '${agent.name}' (${agent.id}) is SUSPENDED. All protected metered execution is denied.`,
+        },
+      };
+    }
+
+    if (agent.status === "REVOKED") {
+      mockStore.auditFeed.unshift({
+        type: "AGENT_AUTHORIZATION_DENIED",
+        capId,
+        agentId: agent.id,
+        agentName: agent.name,
+        amount,
+        reason: "Agent authority permanently revoked",
+        timestamp: nowStr,
+      });
+
+      const revokedAgentPayment: PaymentAttempt = {
+        id: uid("pay_"),
+        capId,
+        agentId: agent.id,
+        agentName: agent.name,
+        serviceAddress: cap.serviceAddress,
+        serviceName: "Vaultbreaker AI Text Summarizer API",
+        amount,
+        asset: "HBAR",
+        network: "Hedera Testnet (296)",
+        decision: "DENIED",
+        status: "REJECTED",
+        reason: "AGENT_REVOKED",
+        evaluationTrace: [
+          { stage: "REQUEST_RECEIVED", status: "PASS", detail: "HTTP POST request parsed", timestamp: nowStr },
+          { stage: "CAPABILITY_RESOLVED", status: "PASS", detail: `Capability resolved for ${agent.name}`, timestamp: nowStr },
+          { stage: "POLICY_EVALUATED", status: "FAIL", detail: `Authorization Gate: Agent '${agent.name}' is REVOKED. Execution permanently denied.`, timestamp: nowStr },
+        ],
+        timestamp: nowStr,
+        isDemoFixture: true,
+      };
+      mockStore.paymentAttempts.unshift(revokedAgentPayment);
+
+      return {
+        status: 403,
+        ok: false,
+        data: {
+          error: "AGENT_REVOKED",
+          message: `Authorization Gate: Agent '${agent.name}' (${agent.id}) is REVOKED. Execution permanently denied.`,
+        },
+      };
+    }
   }
 
   if (cap.revoked) {
@@ -602,22 +708,185 @@ export async function fetchAuditFeed(): Promise<HCSAuditEvent[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3 Domain Data Methods
+// Phase 3 & 4 Domain Data Methods: Agents & Lifecycle
 // ---------------------------------------------------------------------------
 
 export async function fetchAgents(): Promise<Agent[]> {
-  const caps = await fetchCapabilities();
-  const agentMap = new Map<string, Agent>();
-
-  demoAgents.forEach((a) => agentMap.set(a.id, { ...a }));
-
-  // Dynamic calculation based on issued capabilities
-  const activeAgentAlpha = agentMap.get("agent_alpha");
-  if (activeAgentAlpha) {
-    activeAgentAlpha.capabilitiesCount = caps.length;
+  if (mockStore.brokerOnline) {
+    try {
+      const res = await fetch(`${BROKER_BASE_URL}/api/agents`);
+      if (res.ok) {
+        const brokerAgents: any[] = await res.json();
+        const caps = await fetchCapabilities();
+        return brokerAgents.map((a) => ({
+          id: a.id,
+          name: a.name,
+          description: a.description || "",
+          status: a.status,
+          walletAddress: a.walletAddress,
+          network: a.network || "Hedera Testnet (296)",
+          capabilitiesCount: caps.filter((c: any) => c.agentId === a.id).length,
+          totalSpentHbar: a.totalSpentHbar || 0,
+          totalCallsExecuted: a.totalCallsExecuted || 0,
+          totalCallsRejected: a.totalCallsRejected || 0,
+          createdAt: a.createdAt,
+          lastActiveAt: a.lastActiveAt,
+          isDemoFixture: false,
+        }));
+      }
+    } catch (err) {
+      console.warn("[API] fetchAgents broker call notice, falling back to mock:", err);
+    }
   }
 
-  return Array.from(agentMap.values());
+  const caps = await fetchCapabilities();
+  const list = Array.from(mockStore.agents.values()).map((a) => ({ ...a }));
+  const alpha = list.find((a) => a.id === "agent_alpha");
+  if (alpha) {
+    alpha.capabilitiesCount = caps.length;
+  }
+  return list;
+}
+
+export async function fetchAgent(id: string): Promise<Agent | null> {
+  if (mockStore.brokerOnline) {
+    try {
+      const res = await fetch(`${BROKER_BASE_URL}/api/agents/${id}`);
+      if (res.ok) {
+        const a = await res.json();
+        return {
+          id: a.id,
+          name: a.name,
+          description: a.description || "",
+          status: a.status,
+          walletAddress: a.walletAddress,
+          network: a.network || "Hedera Testnet (296)",
+          capabilitiesCount: (a.capabilities || []).length,
+          totalSpentHbar: a.totalSpentHbar || 0,
+          totalCallsExecuted: a.totalCallsExecuted || 0,
+          totalCallsRejected: a.totalCallsRejected || 0,
+          createdAt: a.createdAt,
+          lastActiveAt: a.lastActiveAt,
+          isDemoFixture: false,
+        };
+      }
+    } catch {
+      // fallback
+    }
+  }
+  return mockStore.agents.get(id) || null;
+}
+
+export async function createAgent(input: {
+  name: string;
+  description?: string;
+  walletAddress?: string;
+}): Promise<Agent> {
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/agents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || data.error || "Failed to create agent");
+    }
+    return {
+      ...data,
+      capabilitiesCount: 0,
+      isDemoFixture: false,
+    };
+  }
+
+  // Client-side demo fallback
+  const name = (input.name || "").trim();
+  if (!name || name.length < 2) {
+    throw new Error("VALIDATION_ERROR: 'name' must be at least 2 characters");
+  }
+
+  for (const existing of mockStore.agents.values()) {
+    if (existing.name.toLowerCase() === name.toLowerCase()) {
+      throw new Error(`CONFLICT: Agent with name '${name}' already exists`);
+    }
+  }
+
+  const newId = `agent_${uid()}`;
+  const now = new Date().toISOString();
+  const newAgent: Agent = {
+    id: newId,
+    name,
+    description: (input.description || "").trim(),
+    status: "ACTIVE",
+    walletAddress: input.walletAddress || `0x${uid()}${uid()}${uid()}`,
+    network: "Hedera Testnet (296)",
+    capabilitiesCount: 0,
+    totalSpentHbar: 0,
+    totalCallsExecuted: 0,
+    totalCallsRejected: 0,
+    createdAt: now,
+    lastActiveAt: now,
+    isDemoFixture: true,
+  };
+
+  mockStore.agents.set(newId, newAgent);
+  mockStore.auditFeed.unshift({
+    type: "AGENT_REGISTERED",
+    agentId: newId,
+    agentName: name,
+    timestamp: now,
+  });
+
+  return newAgent;
+}
+
+export async function transitionAgentStatus(
+  id: string,
+  targetStatus: "ACTIVE" | "SUSPENDED" | "REVOKED",
+  reason?: string
+): Promise<{ agent: Agent; previousStatus: string; reason?: string }> {
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/agents/${id}/transition`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targetStatus, reason }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || data.error || "Failed to transition agent");
+    }
+    return data;
+  }
+
+  // Client-side demo fallback
+  const agent = mockStore.agents.get(id);
+  if (!agent) throw new Error(`NOT_FOUND: Agent '${id}' not found`);
+
+  const allowed: Record<string, string[]> = {
+    ACTIVE: ["SUSPENDED", "REVOKED"],
+    SUSPENDED: ["ACTIVE", "REVOKED"],
+    REVOKED: [],
+  };
+
+  if (!allowed[agent.status]?.includes(targetStatus)) {
+    throw new Error(`INVALID_TRANSITION: Cannot transition from ${agent.status} to ${targetStatus}`);
+  }
+
+  const previousStatus = agent.status;
+  agent.status = targetStatus;
+  const now = new Date().toISOString();
+
+  mockStore.auditFeed.unshift({
+    type: "AGENT_STATUS_CHANGED",
+    agentId: agent.id,
+    agentName: agent.name,
+    previousStatus,
+    newStatus: targetStatus,
+    reason: reason || `Transitioned to ${targetStatus}`,
+    timestamp: now,
+  });
+
+  return { agent, previousStatus, reason };
 }
 
 export async function fetchServices(): Promise<ServiceItem[]> {
