@@ -7,7 +7,7 @@ The following matrix documents the verified state of all key features in Vaultbr
 | **Wallet Connection (MetaMask/HashPack)** | ❌ No | ❌ No | ❌ No | ❌ No | ❌ N/A | `wagmi`/`viem` in `package.json`, but zero wallet connection components or hooks in frontend source. |
 | **Ledger Hardware CLI Protection** | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No | Implemented in `broker/src/ledger/keyring.ts`. Probes `wallet-cli --version` and runs CLI encrypt/decrypt. |
 | **Ledger Seed Enclave Fallback** | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No | AES-256-GCM seed fallback in `keyring.ts`. Fully verified in Vitest (`broker.test.ts`). |
-| **Agent Creation / Identity** | ❌ No | ❌ No | ❌ No | ❌ No | ❌ N/A | Agents are represented only by string identifiers or JWT payloads; no formal Agent registry exists. |
+| **Agent Identity & Lifecycle Registry** | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No | Implemented in `broker/src/agent/registry.ts` & `/api/agents`. Authoritative state machine (`ACTIVE`, `SUSPENDED`, `REVOKED`), server-side auth gate in `/api/metered-service`, and UI management in `AgentsView.tsx`. Verified by 15 tests in `agent.test.ts`. |
 | **Spend Policy Registration** | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No | Implemented in `broker/src/policy/engine.ts` (`registerPolicy`) and UI `DeveloperConsole.tsx`. |
 | **Capability Token Issuance** | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No | Implemented in `policy/engine.ts` (`issueCapability`). Mints JWT signed with `JWT_SECRET`. |
 | **Capability Revocation (Broker Memory)** | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ❌ No | Implemented in `policy/engine.ts` (`revokeCapability`). Verified in unit & E2E tests. |

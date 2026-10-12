@@ -18,8 +18,8 @@ This roadmap defines the multi-phase evolution of Vaultbreaker from a hackathon 
 - [x] **PHASE 3 — Core Product Experience** `[COMPLETED]`
   - End-to-end management views for Dashboard, Agents, Capabilities, Policies, Services, Payments, Audit Trail, and Agent Terminal with live broker API bindings and simulation mode.
 
-- [ ] **PHASE 4 — Agent Management**
-  - Agent identity registration, key delegation, permission scoping, and agent life-cycle management.
+- [x] **PHASE 4 — Agent Lifecycle & Management** `[COMPLETED]`
+  - Authoritative agent registry, state machine (`ACTIVE`, `SUSPENDED`, `REVOKED`), server-side lifecycle authorization enforcement gate in `/api/metered-service`, safe wallet binding, and frontend management controls.
 
 - [ ] **PHASE 5 — Capability Management**
   - Fine-grained capability object creation, lifetime management, spending limits, daily budget enforcement, and emergency revocation controls.
