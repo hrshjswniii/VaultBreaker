@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import { LedgerKeyRing } from "../ledger/keyring.js";
 import { HederaHCSLogger } from "../hedera/hcs.js";
-import { PolicyEngine } from "../policy/engine.js";
+import { PolicyEngine, getCapabilityStatus } from "../policy/engine.js";
 import { AgentRegistry, AgentStatus } from "../agent/registry.js";
 import { ethers } from "ethers";
 
@@ -62,7 +62,10 @@ export function createApiRouter(
     }
 
     // Attach capabilities issued to this agent
-    const capabilities = policyEngine.listCapabilities().filter((c) => c.agentId === id);
+    const capabilities = policyEngine.listCapabilities(id).map((c) => ({
+      ...c,
+      status: getCapabilityStatus(c),
+    }));
 
     res.json({
       ...agent,
@@ -156,30 +159,71 @@ export function createApiRouter(
     }
   });
 
-  // 4. Issue Capability Token (Ledger seed protected & bound to Agent)
+  // 4. Issue Capability Token (Phase 5 Canonical Permission & Scope Management)
   router.post("/capabilities/issue", async (req: Request, res: Response) => {
     try {
-      const { policyId, requestedBudget, requestedTtlSeconds, settlementCredentialSecret, agentId } = req.body;
+      const {
+        policyId,
+        requestedBudget,
+        requestedTtlSeconds,
+        settlementCredentialSecret,
+        agentId,
+        allowedActions,
+        resourceScope,
+      } = req.body;
 
-      if (agentId) {
-        const agent = agentRegistry.getAgent(agentId);
-        if (!agent) {
-          return res.status(404).json({
-            error: "AGENT_NOT_FOUND",
-            message: `Cannot issue capability: Agent '${agentId}' not found.`,
-          });
-        }
+      if (!policyId) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "'policyId' is required",
+        });
       }
 
-      const capability = await policyEngine.issueCapability(
-        policyId,
-        requestedBudget ? Number(requestedBudget) : undefined,
-        requestedTtlSeconds ? Number(requestedTtlSeconds) : undefined,
-        settlementCredentialSecret,
-        agentId
-      );
+      const targetAgentId = agentId || "agent_alpha";
+      const agent = agentRegistry.getAgent(targetAgentId);
 
-      // Submit HCS Audit Event to Hedera
+      // Verify target agent exists
+      if (!agent) {
+        return res.status(404).json({
+          error: "AGENT_NOT_FOUND",
+          message: `Cannot issue capability: Agent '${targetAgentId}' not found in registry.`,
+        });
+      }
+
+      // Verify agent eligibility: Only ACTIVE agents can receive capabilities
+      if (agent.status === "SUSPENDED") {
+        return res.status(403).json({
+          error: "AGENT_SUSPENDED",
+          message: `Cannot issue capability: Agent '${agent.name}' is currently SUSPENDED. Resume the agent before granting authority.`,
+        });
+      }
+
+      if (agent.status === "REVOKED") {
+        return res.status(403).json({
+          error: "AGENT_REVOKED",
+          message: `Cannot issue capability: Agent '${agent.name}' is permanently REVOKED. Terminated agents cannot receive authority.`,
+        });
+      }
+
+      if (agent.status !== "ACTIVE") {
+        return res.status(400).json({
+          error: "AGENT_NOT_ELIGIBLE",
+          message: `Cannot issue capability: Agent '${agent.name}' is in non-operational state '${agent.status}'.`,
+        });
+      }
+
+      // Delegate to authoritative PolicyEngine with strict validation
+      const capability = await policyEngine.issueCapability({
+        policyId,
+        requestedBudget: requestedBudget !== undefined ? Number(requestedBudget) : undefined,
+        requestedTtlSeconds: requestedTtlSeconds !== undefined ? Number(requestedTtlSeconds) : undefined,
+        settlementCredentialSecret,
+        agentId: targetAgentId,
+        allowedActions,
+        resourceScope,
+      });
+
+      // Submit CAPABILITY_ISSUED Audit Event to Hedera HCS
       await hcsLogger.logAuditEvent({
         type: "CAPABILITY_ISSUED",
         capId: capability.capId,
@@ -188,18 +232,34 @@ export function createApiRouter(
         amount: 0,
         budgetRemaining: capability.budgetTotal,
         policyHash: capability.policyHash,
+        reason: `Capability issued with actions [${capability.allowedActions.join(", ")}] and scope '${capability.resourceScope}'`,
         timestamp: new Date().toISOString(),
       });
 
-      res.status(201).json(capability);
+      res.status(201).json({
+        ...capability,
+        status: getCapabilityStatus(capability),
+      });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      const message = err.message || "Failed to issue capability";
+      if (message.includes("Policy") && message.includes("not found")) {
+        return res.status(404).json({ error: "POLICY_NOT_FOUND", message });
+      }
+      if (message.startsWith("VALIDATION_ERROR:")) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message });
+      }
+      res.status(400).json({ error: "BAD_REQUEST", message });
     }
   });
 
-  // 5. Inspect Capability
+  // 5. Inspect Capabilities
   router.get("/capabilities", (req: Request, res: Response) => {
-    res.json(policyEngine.listCapabilities());
+    const agentIdFilter = req.query.agentId as string | undefined;
+    const caps = policyEngine.listCapabilities(agentIdFilter).map((c) => ({
+      ...c,
+      status: getCapabilityStatus(c),
+    }));
+    res.json(caps);
   });
 
   router.get("/capabilities/:capId", async (req: Request, res: Response) => {
@@ -207,7 +267,7 @@ export function createApiRouter(
     const capability = policyEngine.getCapability(capId);
 
     if (!capability) {
-      return res.status(404).json({ error: "Capability token not found" });
+      return res.status(404).json({ error: "CAPABILITY_NOT_FOUND", message: "Capability token not found" });
     }
 
     // Query on-chain budget if available
@@ -230,32 +290,60 @@ export function createApiRouter(
       ...capability,
       budgetRemaining: onChainBudget,
       revoked: onChainRevoked,
+      status: getCapabilityStatus({
+        ...capability,
+        budgetRemaining: onChainBudget,
+        revoked: onChainRevoked,
+      }),
     });
   });
 
-  // 6. Revoke Capability
+  // 6. Revoke Capability (Authoritative Revocation)
   router.post("/capabilities/revoke", async (req: Request, res: Response) => {
     try {
-      const { capId } = req.body;
-      const success = policyEngine.revokeCapability(capId);
+      const { capId, reason } = req.body;
+      if (!capId) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "'capId' is required to revoke a capability",
+        });
+      }
 
+      const capability = policyEngine.getCapability(capId);
+      if (!capability) {
+        return res.status(404).json({
+          error: "CAPABILITY_NOT_FOUND",
+          message: `Capability '${capId}' not found in registry`,
+        });
+      }
+
+      const success = policyEngine.revokeCapability(capId);
       if (!success) {
-        return res.status(404).json({ error: "Capability not found" });
+        return res.status(500).json({ error: "INTERNAL_ERROR", message: "Failed to revoke capability" });
       }
 
       await hcsLogger.logAuditEvent({
         type: "CAPABILITY_REVOKED",
         capId,
+        agentId: capability.agentId,
+        reason: reason || "Explicit revocation by administrative operator",
         timestamp: new Date().toISOString(),
       });
 
-      res.json({ success: true, capId, message: "Capability revoked successfully" });
+      res.json({
+        success: true,
+        capId,
+        agentId: capability.agentId,
+        status: "REVOKED",
+        revokedAt: capability.revokedAt,
+        message: "Capability revoked successfully. All subsequent spend attempts will fail closed.",
+      });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: "BAD_REQUEST", message: err.message });
     }
   });
 
-  // 7. x402-Gated Metered Service Endpoint with Server-Side Agent Lifecycle Enforcement
+  // 7. x402-Gated Metered Service Endpoint with Server-Side Scope, Action & Lifecycle Enforcement
   router.post("/metered-service", async (req: Request, res: Response) => {
     const authHeader = req.headers["x-capability-token"] as string;
     const paymentAmountHeader = (req.headers["x-payment-amount"] as string) || "10";
@@ -282,19 +370,55 @@ export function createApiRouter(
       return res.status(404).json({ error: "CAPABILITY_NOT_FOUND", message: "Capability record does not exist." });
     }
 
-    // Resolve authoritative Agent identifier (from decoded token or capability object)
-    const agentId = decoded.agentId || capability.agentId || "agent_alpha";
-    const agent = agentRegistry.getAgent(agentId);
+    // =========================================================================
+    // 1. AGENT IDENTITY BINDING & SUBSTITUTION VERIFICATION
+    // =========================================================================
+    // The capability's owner is authoritative
+    const authoritativeAgentId = capability.agentId;
+
+    // Verify token's claimed agent matches capability's bound agent
+    if (decoded.agentId && decoded.agentId !== authoritativeAgentId) {
+      await hcsLogger.logAuditEvent({
+        type: "AGENT_AUTHORIZATION_DENIED",
+        capId,
+        agentId: decoded.agentId,
+        reason: "Token agentId does not match capability owner",
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        error: "AGENT_MISMATCH",
+        capId,
+        message: "Authorization Gate: Token agent identity mismatch with capability record.",
+      });
+    }
+
+    // Verify client-supplied header or payload (prevent substitution attack)
+    const clientSuppliedAgent = (req.headers["x-agent-id"] as string) || req.body.agentId;
+    if (clientSuppliedAgent && clientSuppliedAgent !== authoritativeAgentId) {
+      await hcsLogger.logAuditEvent({
+        type: "AGENT_AUTHORIZATION_DENIED",
+        capId,
+        agentId: clientSuppliedAgent,
+        reason: `Agent substitution attempted: client claimed '${clientSuppliedAgent}' but capability is bound to '${authoritativeAgentId}'`,
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        error: "AGENT_MISMATCH",
+        capId,
+        message: `Authorization Gate: Agent substitution prohibited. Capability is strictly bound to '${authoritativeAgentId}'.`,
+      });
+    }
+
+    const agent = agentRegistry.getAgent(authoritativeAgentId);
 
     // =========================================================================
-    // AUTHORITATIVE AGENT LIFECYCLE ENFORCEMENT GATE
-    // Evaluated BEFORE key decryption, spend execution, or contract invocation.
+    // 2. PHASE 4 AGENT LIFECYCLE GATE
     // =========================================================================
     if (!agent) {
       await hcsLogger.logAuditEvent({
         type: "AGENT_AUTHORIZATION_DENIED",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
         amount: amountToSpend,
         reason: "Agent record does not exist in registry",
         timestamp: new Date().toISOString(),
@@ -302,17 +426,17 @@ export function createApiRouter(
       return res.status(403).json({
         error: "AGENT_NOT_FOUND",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
         message: "Authorization Gate: Associated agent identity not found. Execution failed closed.",
       });
     }
 
     if (agent.status === "SUSPENDED") {
-      agentRegistry.recordActivity(agentId, amountToSpend, false);
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
       await hcsLogger.logAuditEvent({
         type: "AGENT_AUTHORIZATION_DENIED",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
         agentName: agent.name,
         amount: amountToSpend,
         reason: "Agent is currently SUSPENDED by administrator",
@@ -321,18 +445,18 @@ export function createApiRouter(
       return res.status(403).json({
         error: "AGENT_SUSPENDED",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
         status: "SUSPENDED",
-        message: `Authorization Gate: Agent '${agent.name}' (${agentId}) is SUSPENDED. All protected metered requests are denied.`,
+        message: `Authorization Gate: Agent '${agent.name}' (${authoritativeAgentId}) is SUSPENDED. All protected metered requests are denied.`,
       });
     }
 
     if (agent.status === "REVOKED") {
-      agentRegistry.recordActivity(agentId, amountToSpend, false);
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
       await hcsLogger.logAuditEvent({
         type: "AGENT_AUTHORIZATION_DENIED",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
         agentName: agent.name,
         amount: amountToSpend,
         reason: "Agent authority permanently REVOKED",
@@ -341,30 +465,31 @@ export function createApiRouter(
       return res.status(403).json({
         error: "AGENT_REVOKED",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
         status: "REVOKED",
-        message: `Authorization Gate: Agent '${agent.name}' (${agentId}) is REVOKED. Execution permanently denied.`,
+        message: `Authorization Gate: Agent '${agent.name}' (${authoritativeAgentId}) is REVOKED. Execution permanently denied.`,
       });
     }
 
     if (agent.status !== "ACTIVE") {
-      // Unknown or non-canonical status: fail closed
-      agentRegistry.recordActivity(agentId, amountToSpend, false);
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
       return res.status(403).json({
         error: "AGENT_INVALID_STATE",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
         message: "Authorization Gate: Agent status is not approved for execution. Failed closed.",
       });
     }
 
-    // Check Capability Revocation
+    // =========================================================================
+    // 3. CAPABILITY REVOCATION & EXPIRATION LIFECYCLE CHECKS
+    // =========================================================================
     if (capability.revoked) {
-      agentRegistry.recordActivity(agentId, amountToSpend, false);
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
       await hcsLogger.logAuditEvent({
         type: "CAPABILITY_REJECTED",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
         amount: amountToSpend,
         reason: "Capability Revoked by Issuer",
         timestamp: new Date().toISOString(),
@@ -376,14 +501,13 @@ export function createApiRouter(
       });
     }
 
-    // Check Expiry
     const nowSec = Math.floor(Date.now() / 1000);
     if (nowSec >= capability.expiry) {
-      agentRegistry.recordActivity(agentId, amountToSpend, false);
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
       await hcsLogger.logAuditEvent({
         type: "CAPABILITY_REJECTED",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
         amount: amountToSpend,
         reason: "Capability Expired",
         timestamp: new Date().toISOString(),
@@ -395,13 +519,75 @@ export function createApiRouter(
       });
     }
 
-    // Check Budget
-    if (capability.budgetRemaining < amountToSpend) {
-      agentRegistry.recordActivity(agentId, amountToSpend, false);
+    // =========================================================================
+    // 4. LEAST-PRIVILEGE ACTION CONSTRAINTS
+    // =========================================================================
+    const requestedAction =
+      (req.headers["x-requested-action"] as string) || req.body.action || "EXECUTE_METERED_SERVICE";
+
+    if (!capability.allowedActions.includes(requestedAction)) {
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
       await hcsLogger.logAuditEvent({
         type: "CAPABILITY_REJECTED",
         capId,
-        agentId,
+        agentId: authoritativeAgentId,
+        amount: amountToSpend,
+        reason: `Requested action '${requestedAction}' is not in allowed actions [${capability.allowedActions.join(", ")}]`,
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        error: "ACTION_NOT_PERMITTED",
+        capId,
+        requestedAction,
+        allowedActions: capability.allowedActions,
+        message: `Authorization Gate: Action '${requestedAction}' is not permitted by capability scope.`,
+      });
+    }
+
+    // =========================================================================
+    // 5. LEAST-PRIVILEGE RESOURCE & SERVICE SCOPE CONSTRAINTS
+    // =========================================================================
+    const targetResource =
+      (req.headers["x-target-resource"] as string) || req.body.resource || "/api/metered-service";
+
+    if (
+      capability.resourceScope !== targetResource &&
+      capability.serviceAddress.toLowerCase() !== targetResource.toLowerCase()
+    ) {
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
+      await hcsLogger.logAuditEvent({
+        type: "CAPABILITY_REJECTED",
+        capId,
+        agentId: authoritativeAgentId,
+        amount: amountToSpend,
+        reason: `Target resource '${targetResource}' is outside granted scope '${capability.resourceScope}'`,
+        timestamp: new Date().toISOString(),
+      });
+      return res.status(403).json({
+        error: "RESOURCE_OUT_OF_SCOPE",
+        capId,
+        targetResource,
+        resourceScope: capability.resourceScope,
+        message: `Authorization Gate: Target resource '${targetResource}' is outside granted scope '${capability.resourceScope}'.`,
+      });
+    }
+
+    // =========================================================================
+    // 6. EXACT BUDGET LIMIT ENFORCEMENT & DEDUCTION
+    // =========================================================================
+    if (isNaN(amountToSpend) || amountToSpend <= 0) {
+      return res.status(400).json({
+        error: "INVALID_AMOUNT",
+        message: "Payment amount must be a positive integer.",
+      });
+    }
+
+    if (capability.budgetRemaining < amountToSpend) {
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
+      await hcsLogger.logAuditEvent({
+        type: "CAPABILITY_REJECTED",
+        capId,
+        agentId: authoritativeAgentId,
         amount: amountToSpend,
         budgetRemaining: capability.budgetRemaining,
         reason: "Budget Exhausted",
@@ -417,20 +603,20 @@ export function createApiRouter(
       });
     }
 
-    // Execute Decrement
+    // Execute atomic memory budget decrement
     const remainingAfterSpend = policyEngine.decrementMemoryBudget(capId, amountToSpend);
 
     // Decrypt settlement credential in memory using Ledger Key Ring (credential never leaves broker)
     await keyring.decryptCredential(capability.encryptedCredential);
 
     // Record successful agent activity in registry
-    agentRegistry.recordActivity(agentId, amountToSpend, true);
+    agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, true);
 
     // Write HCS Audit Event to Hedera Consensus Service
     const hcsResult = await hcsLogger.logAuditEvent({
       type: "CAPABILITY_SPENT",
       capId,
-      agentId,
+      agentId: authoritativeAgentId,
       service: capability.serviceAddress,
       amount: amountToSpend,
       budgetRemaining: remainingAfterSpend,
@@ -443,8 +629,10 @@ export function createApiRouter(
     res.json({
       status: "SUCCESS",
       capId,
-      agentId,
+      agentId: authoritativeAgentId,
       agentStatus: agent.status,
+      action: requestedAction,
+      resource: targetResource,
       amountCharged: amountToSpend,
       budgetRemaining: remainingAfterSpend,
       hcsAuditMessage: hcsResult.message,
