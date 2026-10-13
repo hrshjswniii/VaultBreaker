@@ -240,6 +240,7 @@ export default function Home() {
           <CapabilitiesView
             capabilities={capabilities}
             policies={policies}
+            agents={agents}
             onRefresh={loadData}
             onNavigate={(tab) => setActiveTab(tab as NavTab)}
             onSelectCapabilityForAgent={handleSelectCapability}
