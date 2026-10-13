@@ -9,19 +9,48 @@ export interface Policy {
   createdAt: string;
 }
 
+export type CapabilityStatus = "ACTIVE" | "EXHAUSTED" | "EXPIRED" | "REVOKED";
+
 export interface Capability {
   capId: string;
+  agentId?: string;
   policyId: string;
   policyHash: string;
   serviceAddress: string;
+  allowedActions?: string[];
+  resourceScope?: string;
   budgetTotal: number;
   budgetRemaining: number;
+  currency?: string;
   expiry: number;
   issuer: string;
   encryptedCredential: string;
   token: string;
   revoked: boolean;
+  revokedAt?: string;
+  status?: CapabilityStatus;
   createdAt: string;
+}
+
+export interface IssueCapabilityOptions {
+  agentId?: string;
+  budget?: number;
+  allowedActions?: string[];
+  resourceScope?: string;
+  ttlSeconds?: number;
+}
+
+
+export function getCapabilityStatus(cap: {
+  revoked: boolean;
+  expiry: number;
+  budgetRemaining: number;
+}): CapabilityStatus {
+  if (cap.revoked) return "REVOKED";
+  const now = Math.floor(Date.now() / 1000);
+  if (now >= cap.expiry) return "EXPIRED";
+  if (cap.budgetRemaining <= 0) return "EXHAUSTED";
+  return "ACTIVE";
 }
 
 export interface HCSAuditEvent {
@@ -271,40 +300,78 @@ function mockCreatePolicy(body: Partial<Policy>): Policy {
   return policy;
 }
 
-function mockIssueCapability(policyId: string, budget?: number): Capability {
+function mockIssueCapability(
+  policyId: string,
+  budgetOrOptions?: number | IssueCapabilityOptions
+): Capability {
+  const options: IssueCapabilityOptions =
+    typeof budgetOrOptions === "number" ? { budget: budgetOrOptions } : budgetOrOptions || {};
+
   const policy = mockStore.policies.get(policyId);
   if (!policy) throw new Error(`Policy ${policyId} not found`);
+
+  const targetAgentId = options.agentId || "agent_alpha";
+  const agent = mockStore.agents.get(targetAgentId);
+  if (agent) {
+    if (agent.status === "SUSPENDED") {
+      throw new Error(`Cannot issue capability: Agent '${agent.name}' is currently SUSPENDED.`);
+    }
+    if (agent.status === "REVOKED") {
+      throw new Error(`Cannot issue capability: Agent '${agent.name}' is permanently REVOKED.`);
+    }
+  }
+
+  const budgetTotal = Math.min(options.budget || policy.dailyBudget, policy.dailyBudget);
+  const ttl = Math.min(options.ttlSeconds || policy.ttlSeconds, policy.ttlSeconds);
+  const expiry = Math.floor(Date.now() / 1000) + ttl;
   const capId = "0x" + uid() + uid() + uid() + uid();
-  const budgetTotal = Math.min(budget || policy.dailyBudget, policy.dailyBudget);
-  const expiry = Math.floor(Date.now() / 1000) + policy.ttlSeconds;
+
+  const actions =
+    options.allowedActions && options.allowedActions.length > 0
+      ? options.allowedActions
+      : ["EXECUTE_METERED_SERVICE"];
+  const scope = options.resourceScope || policy.serviceEndpoint;
+
   const cap: Capability = {
     capId,
+    agentId: targetAgentId,
     policyId: policy.id,
     policyHash: "0x" + uid() + uid() + uid() + uid(),
     serviceAddress: policy.serviceAddress,
+    allowedActions: actions,
+    resourceScope: scope,
     budgetTotal,
     budgetRemaining: budgetTotal,
+    currency: "HBAR",
     expiry,
     issuer: "0xBrokerAdminIssuerAddress",
     encryptedCredential: '{"provider":"ledger-keyring-v1","iv":"demo","tag":"demo","ciphertext":"demo"}',
     token: `demo.jwt.${capId}`,
     revoked: false,
+    status: "ACTIVE",
     createdAt: new Date().toISOString(),
   };
   mockStore.capabilities.set(capId, cap);
   mockStore.auditFeed.unshift({
     type: "CAPABILITY_ISSUED",
     capId,
+    agentId: targetAgentId,
     service: policy.serviceAddress,
     amount: 0,
     budgetRemaining: budgetTotal,
     policyHash: cap.policyHash,
+    reason: `Capability issued with actions [${actions.join(", ")}] and scope '${scope}'`,
     timestamp: new Date().toISOString(),
   });
   return cap;
 }
 
-function mockExecuteMeteredCall(token: string, promptText: string, amount: number) {
+function mockExecuteMeteredCall(
+  token: string,
+  promptText: string,
+  amount: number,
+  options?: { action?: string; resource?: string; agentId?: string }
+) {
   const capId = token.startsWith("demo.jwt.") ? token.replace("demo.jwt.", "") : null;
   const nowStr = new Date().toISOString();
 
@@ -312,7 +379,7 @@ function mockExecuteMeteredCall(token: string, promptText: string, amount: numbe
     const failedPayment: PaymentAttempt = {
       id: uid("pay_"),
       capId: token.slice(0, 12),
-      agentId: "agent_alpha",
+      agentId: options?.agentId || "agent_alpha",
       agentName: "Agent Alpha (Summarizer)",
       serviceAddress: "0x0000000000000000000000000000000000000004",
       serviceName: "Vaultbreaker AI Text Summarizer API",
@@ -338,8 +405,22 @@ function mockExecuteMeteredCall(token: string, promptText: string, amount: numbe
     return { status: 404, ok: false, data: { error: "CAPABILITY_NOT_FOUND" } };
   }
 
+  // 1. Agent Binding & Substitution Check
+  const effectiveAgentId = cap.agentId || "agent_alpha";
+  if (options?.agentId && options.agentId !== effectiveAgentId) {
+    return {
+      status: 403,
+      ok: false,
+      data: {
+        error: "AGENT_MISMATCH",
+        message: `Agent binding failure: token belongs to agent '${effectiveAgentId}', but request presented agent '${options.agentId}'`,
+      },
+    };
+  }
+
   // Authoritative Agent Lifecycle Check in Mock / Offline Mode
-  const agent = mockStore.agents.get("agent_alpha");
+  const agent = mockStore.agents.get(effectiveAgentId);
+
   if (agent) {
     if (agent.status === "SUSPENDED") {
       mockStore.auditFeed.unshift({
@@ -516,6 +597,37 @@ function mockExecuteMeteredCall(token: string, promptText: string, amount: numbe
     };
   }
 
+  // Action constraint check
+  const requestedAction = options?.action || "EXECUTE_METERED_SERVICE";
+  if (cap.allowedActions && cap.allowedActions.length > 0 && !cap.allowedActions.includes(requestedAction)) {
+    return {
+      status: 403,
+      ok: false,
+      data: {
+        error: "ACTION_NOT_PERMITTED",
+        message: `Action '${requestedAction}' is not permitted by capability (allowed: [${cap.allowedActions.join(", ")}])`,
+      },
+    };
+  }
+
+  // Resource scope constraint check
+  const requestedResource = options?.resource || "/api/metered-service";
+  if (
+    cap.resourceScope &&
+    cap.resourceScope !== "*" &&
+    cap.resourceScope !== requestedResource &&
+    cap.serviceAddress !== requestedResource
+  ) {
+    return {
+      status: 403,
+      ok: false,
+      data: {
+        error: "RESOURCE_OUT_OF_SCOPE",
+        message: `Resource '${requestedResource}' is out of capability scope '${cap.resourceScope}'`,
+      },
+    };
+  }
+
   if (cap.budgetRemaining < amount) {
     mockStore.auditFeed.unshift({
       type: "CAPABILITY_REJECTED",
@@ -649,16 +761,33 @@ export async function createPolicy(policy: Partial<Policy>): Promise<Policy> {
   return mockCreatePolicy(policy);
 }
 
-export async function issueCapability(policyId: string, budget?: number): Promise<Capability> {
+export async function issueCapability(
+  policyId: string,
+  budgetOrOptions?: number | IssueCapabilityOptions
+): Promise<Capability> {
+  const options: IssueCapabilityOptions =
+    typeof budgetOrOptions === "number" ? { budget: budgetOrOptions } : budgetOrOptions || {};
+
   if (mockStore.brokerOnline) {
     const res = await fetch(`${BROKER_BASE_URL}/api/capabilities/issue`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ policyId, requestedBudget: budget }),
+      body: JSON.stringify({
+        policyId,
+        agentId: options.agentId,
+        requestedBudget: options.budget,
+        allowedActions: options.allowedActions,
+        resourceScope: options.resourceScope,
+        ttlSeconds: options.ttlSeconds,
+      }),
     });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.message || errData.error || `Failed to issue capability (${res.status})`);
+    }
     return res.json();
   }
-  return mockIssueCapability(policyId, budget);
+  return mockIssueCapability(policyId, options);
 }
 
 export async function fetchCapabilities(): Promise<Capability[]> {
@@ -669,34 +798,60 @@ export async function fetchCapabilities(): Promise<Capability[]> {
   return Array.from(mockStore.capabilities.values());
 }
 
-export async function revokeCapability(capId: string) {
+export async function revokeCapability(capId: string, reason?: string) {
   if (mockStore.brokerOnline) {
     const res = await fetch(`${BROKER_BASE_URL}/api/capabilities/revoke`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ capId }),
+      body: JSON.stringify({ capId, reason }),
     });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.message || errData.error || `Failed to revoke capability (${res.status})`);
+    }
     return res.json();
   }
   const cap = mockStore.capabilities.get(capId);
   if (cap) {
     cap.revoked = true;
-    mockStore.auditFeed.unshift({ type: "CAPABILITY_REVOKED", capId, timestamp: new Date().toISOString() });
+    cap.revokedAt = new Date().toISOString();
+    cap.status = "REVOKED";
+    mockStore.auditFeed.unshift({
+      type: "CAPABILITY_REVOKED",
+      capId,
+      agentId: cap.agentId,
+      reason: reason || "Administrative revocation",
+      timestamp: new Date().toISOString(),
+    });
   }
   return { success: true, capId };
 }
 
-export async function executeMeteredCall(token: string, promptText: string, amount: number = 10) {
+export async function executeMeteredCall(
+  token: string,
+  promptText: string,
+  amount: number = 10,
+  options?: { action?: string; resource?: string; agentId?: string }
+) {
   if (mockStore.brokerOnline) {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "x-capability-token": token,
+      "x-payment-amount": String(amount),
+    };
+    if (options?.action) headers["x-action"] = options.action;
+    if (options?.resource) headers["x-resource"] = options.resource;
+    if (options?.agentId) headers["x-agent-id"] = options.agentId;
+
     const res = await fetch(`${BROKER_BASE_URL}/api/metered-service`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-capability-token": token, "x-payment-amount": String(amount) },
+      headers,
       body: JSON.stringify({ prompt: promptText }),
     });
     const data = await res.json();
     return { status: res.status, ok: res.ok, data };
   }
-  return mockExecuteMeteredCall(token, promptText, amount);
+  return mockExecuteMeteredCall(token, promptText, amount, options);
 }
 
 export async function fetchAuditFeed(): Promise<HCSAuditEvent[]> {
