@@ -21,8 +21,8 @@ This roadmap defines the multi-phase evolution of Vaultbreaker from a hackathon 
 - [x] **PHASE 4 — Agent Lifecycle & Management** `[COMPLETED]`
   - Authoritative agent registry, state machine (`ACTIVE`, `SUSPENDED`, `REVOKED`), server-side lifecycle authorization enforcement gate in `/api/metered-service`, safe wallet binding, and frontend management controls.
 
-- [ ] **PHASE 5 — Capability Management**
-  - Fine-grained capability object creation, lifetime management, spending limits, daily budget enforcement, and emergency revocation controls.
+- [x] **PHASE 5 — Capability Management** `[COMPLETED]`
+  - Canonical capability model with deterministic lifecycle states (`ACTIVE`, `EXHAUSTED`, `EXPIRED`, `REVOKED`), least-privilege action and resource scope enforcement, authoritative agent binding (`AGENT_MISMATCH` prevention), non-negative integer budget accounting, immediate broker revocation with HCS audit logging, and full frontend management in `CapabilitiesView.tsx`.
 
 - [ ] **PHASE 6 — Policy Engine**
   - Dynamic policy rule evaluator, rate limits, endpoint bindings, multi-tier budget hierarchies, and automated policy enforcement.

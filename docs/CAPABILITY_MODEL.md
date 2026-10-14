@@ -24,16 +24,23 @@ Agent
   ↓
 Capability Object
   ├── capId: bytes32 (Keccak256 hash of policy + service + budget + expiry + nonce)
-  ├── agentId: string (Target AI Agent)
+  ├── agentId: string (Target AI Agent identifier)
   ├── policyHash: bytes32 (Keccak256 hash of underlying policy rules)
   ├── serviceAddress: address (Target EVM service binding)
+  ├── allowedActions: string[] (Explicitly authorized actions, e.g. ["EXECUTE_METERED_SERVICE"])
+  ├── resourceScope: string (Resource path or service pattern, e.g. "/api/metered-service")
   ├── budgetTotal: uint256 (Initial assigned spend limit)
   ├── budgetRemaining: uint256 (Real-time remaining spend limit)
+  ├── currency: string (Denomination, e.g. "HBAR")
   ├── expiry: uint256 (Unix expiration timestamp)
+  ├── issuer: address / string (Issuing broker authority)
   ├── encryptedCredential: string (Ledger KeyRing protected key reference)
   ├── token: string (Signed JWT bearer token for HTTP headers)
-  └── revoked: boolean (On-chain revocation status)
+  ├── revoked: boolean (Authoritative revocation flag)
+  ├── revokedAt?: string (ISO timestamp of revocation)
+  └── status: CapabilityStatus (ACTIVE | EXHAUSTED | EXPIRED | REVOKED)
 ```
+
 
 ---
 
