@@ -1,12 +1,64 @@
+export type PolicyEffect = "ALLOW" | "DENY";
+
+export interface PolicyConditions {
+  maxPricePerCall?: number;
+  dailyBudget?: number;
+  maxCallsPerMinute?: number;
+  allowedHoursUtc?: { startHour: number; endHour: number };
+  blockedActions?: string[];
+  blockedResources?: string[];
+}
+
 export interface Policy {
   id: string;
   name: string;
+  description?: string;
+  enabled: boolean;
+  effect: PolicyEffect;
+  priority: number;
   serviceEndpoint: string;
   serviceAddress: string;
   maxPricePerCall: number;
   dailyBudget: number;
   ttlSeconds: number;
+  conditions?: PolicyConditions;
+  applicableAgents?: string[];
+  applicableServices?: string[];
+  applicableActions?: string[];
+  version: number;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface PolicyEvaluationContext {
+  agentId: string;
+  serviceAddress: string;
+  action: string;
+  resource: string;
+  amount: number;
+  policyId?: string;
+}
+
+export interface PolicyEvaluationResult {
+  allowed: boolean;
+  decisionId: string;
+  outcome: "ALLOWED" | "DENIED";
+  reasonCode:
+    | "AUTHORIZED"
+    | "POLICY_DENIED"
+    | "PRICE_LIMIT_EXCEEDED"
+    | "VELOCITY_LIMIT_EXCEEDED"
+    | "TIME_WINDOW_VIOLATION"
+    | "BLOCKED_ACTION"
+    | "BLOCKED_RESOURCE"
+    | "NO_APPLICABLE_POLICY"
+    | "POLICY_EVALUATION_FAILED";
+  primaryReason: string;
+  matchedPolicyId?: string;
+  matchedPolicyName?: string;
+  matchedPolicyVersion?: number;
+  evaluationTrace: EvaluationStep[];
+  timestamp: string;
 }
 
 export type CapabilityStatus = "ACTIVE" | "EXHAUSTED" | "EXPIRED" | "REVOKED";
@@ -61,12 +113,21 @@ export interface HCSAuditEvent {
     | "CAPABILITY_REVOKED"
     | "AGENT_REGISTERED"
     | "AGENT_STATUS_CHANGED"
-    | "AGENT_AUTHORIZATION_DENIED";
+    | "AGENT_AUTHORIZATION_DENIED"
+    | "POLICY_REGISTERED"
+    | "POLICY_UPDATED"
+    | "POLICY_TOGGLED"
+    | "POLICY_EVALUATED";
   capId?: string;
   agentId?: string;
   agentName?: string;
   previousStatus?: string;
   newStatus?: string;
+  policyId?: string;
+  policyName?: string;
+  decisionId?: string;
+  outcome?: string;
+  reasonCode?: string;
   service?: string;
   amount?: number;
   budgetRemaining?: number;
@@ -126,8 +187,8 @@ export interface ServiceItem {
 }
 
 export interface EvaluationStep {
-  stage: "REQUEST_RECEIVED" | "CAPABILITY_RESOLVED" | "POLICY_EVALUATED" | "BUDGET_CHECKED" | "DECISION_RETURNED";
-  status: "PASS" | "FAIL" | "PENDING";
+  stage: string;
+  status: "PASS" | "FAIL" | "SKIPPED" | "PENDING";
   detail: string;
   timestamp: string;
 }
@@ -231,19 +292,54 @@ const demoServices: ServiceItem[] = [
   },
 ];
 
+const velocityMap = new Map<string, number[]>();
+
 const mockStore = {
   policies: new Map<string, Policy>([
     [
       "pol_ai_summarizer_v1",
       {
         id: "pol_ai_summarizer_v1",
-        name: "AI Inference & Text Summarization API",
+        name: "AI Inference & Text Summarization Baseline",
+        description: "Default baseline allow policy for metered text summarization service",
+        enabled: true,
+        effect: "ALLOW" as PolicyEffect,
+        priority: 100,
         serviceEndpoint: "/api/metered-service",
         serviceAddress: "0x0000000000000000000000000000000000000004",
         maxPricePerCall: 10,
         dailyBudget: 50,
         ttlSeconds: 3600,
+        conditions: {
+          maxPricePerCall: 10,
+          dailyBudget: 50,
+          maxCallsPerMinute: 60,
+        },
+        version: 1,
         createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ],
+    [
+      "pol_high_value_guard",
+      {
+        id: "pol_high_value_guard",
+        name: "High Value Call Price Ceiling",
+        description: "Denies individual single calls exceeding 25 HBAR across all services",
+        enabled: true,
+        effect: "DENY" as PolicyEffect,
+        priority: 200,
+        serviceEndpoint: "/api/metered-service",
+        serviceAddress: "*",
+        maxPricePerCall: 25,
+        dailyBudget: 100,
+        ttlSeconds: 3600,
+        conditions: {
+          maxPricePerCall: 25,
+        },
+        version: 1,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       },
     ],
   ]),
@@ -284,17 +380,309 @@ function mockHealth() {
   };
 }
 
+function mockEvaluatePolicies(context: PolicyEvaluationContext): PolicyEvaluationResult {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const decisionId = uid("dec_");
+  const evaluationTrace: EvaluationStep[] = [];
+
+  evaluationTrace.push({
+    stage: "EVALUATION_INITIATED",
+    status: "PASS",
+    detail: `Context: Agent=${context.agentId}, Service=${context.serviceAddress}, Action=${context.action}, Amount=${context.amount} HBAR`,
+    timestamp: nowIso,
+  });
+
+  const activePolicies: Policy[] = [];
+  for (const policy of mockStore.policies.values()) {
+    if (!policy.enabled) {
+      evaluationTrace.push({
+        stage: "APPLICABILITY_CHECK",
+        status: "SKIPPED",
+        detail: `Policy '${policy.name}' (${policy.id}) is DISABLED; skipped`,
+        timestamp: nowIso,
+      });
+      continue;
+    }
+
+    if (
+      policy.applicableAgents &&
+      policy.applicableAgents.length > 0 &&
+      !policy.applicableAgents.includes(context.agentId) &&
+      !policy.applicableAgents.includes("*")
+    ) {
+      continue;
+    }
+
+    if (policy.applicableServices && policy.applicableServices.length > 0) {
+      const match = policy.applicableServices.some(
+        (s) => s === "*" || s.toLowerCase() === context.serviceAddress.toLowerCase()
+      );
+      if (!match) continue;
+    } else if (
+      policy.serviceAddress &&
+      policy.serviceAddress !== "*" &&
+      policy.serviceAddress.toLowerCase() !== context.serviceAddress.toLowerCase()
+    ) {
+      continue;
+    }
+
+    if (
+      policy.applicableActions &&
+      policy.applicableActions.length > 0 &&
+      !policy.applicableActions.includes(context.action) &&
+      !policy.applicableActions.includes("*")
+    ) {
+      continue;
+    }
+
+    activePolicies.push(policy);
+  }
+
+  if (activePolicies.length === 0) {
+    evaluationTrace.push({
+      stage: "POLICY_RESOLUTION",
+      status: "PASS",
+      detail: "No applicable policies found; capability baseline authority applies",
+      timestamp: nowIso,
+    });
+    return {
+      allowed: true,
+      decisionId,
+      outcome: "ALLOWED",
+      reasonCode: "AUTHORIZED",
+      primaryReason: "No applicable policy restrictions matched; capability baseline authority granted",
+      evaluationTrace,
+      timestamp: nowIso,
+    };
+  }
+
+  // Sort by priority descending
+  activePolicies.sort((a, b) => b.priority - a.priority);
+
+  for (const policy of activePolicies) {
+    const cond = policy.conditions || {};
+
+    if (cond.blockedActions && cond.blockedActions.includes(context.action)) {
+      evaluationTrace.push({
+        stage: "ACTION_CHECK",
+        status: "FAIL",
+        detail: `Action '${context.action}' is explicitly blocked by policy '${policy.name}'`,
+        timestamp: nowIso,
+      });
+      return {
+        allowed: false,
+        decisionId,
+        outcome: "DENIED",
+        reasonCode: "BLOCKED_ACTION",
+        primaryReason: `Action '${context.action}' is prohibited by policy '${policy.name}'`,
+        matchedPolicyId: policy.id,
+        matchedPolicyName: policy.name,
+        matchedPolicyVersion: policy.version,
+        evaluationTrace,
+        timestamp: nowIso,
+      };
+    }
+
+    if (cond.blockedResources && cond.blockedResources.includes(context.resource)) {
+      evaluationTrace.push({
+        stage: "RESOURCE_CHECK",
+        status: "FAIL",
+        detail: `Resource '${context.resource}' is blocked by policy '${policy.name}'`,
+        timestamp: nowIso,
+      });
+      return {
+        allowed: false,
+        decisionId,
+        outcome: "DENIED",
+        reasonCode: "BLOCKED_RESOURCE",
+        primaryReason: `Resource '${context.resource}' is prohibited by policy '${policy.name}'`,
+        matchedPolicyId: policy.id,
+        matchedPolicyName: policy.name,
+        matchedPolicyVersion: policy.version,
+        evaluationTrace,
+        timestamp: nowIso,
+      };
+    }
+
+    if (cond.allowedHoursUtc) {
+      const curHour = now.getUTCHours();
+      const { startHour, endHour } = cond.allowedHoursUtc;
+      const inWindow =
+        startHour <= endHour
+          ? curHour >= startHour && curHour <= endHour
+          : curHour >= startHour || curHour <= endHour;
+      if (!inWindow) {
+        evaluationTrace.push({
+          stage: "TIME_WINDOW_CHECK",
+          status: "FAIL",
+          detail: `Current UTC hour ${curHour}:00 is outside permitted window [${startHour}:00 - ${endHour}:00]`,
+          timestamp: nowIso,
+        });
+        return {
+          allowed: false,
+          decisionId,
+          outcome: "DENIED",
+          reasonCode: "TIME_WINDOW_VIOLATION",
+          primaryReason: `Execution at UTC hour ${curHour} violates active hours window [${startHour}:00 - ${endHour}:00] in policy '${policy.name}'`,
+          matchedPolicyId: policy.id,
+          matchedPolicyName: policy.name,
+          matchedPolicyVersion: policy.version,
+          evaluationTrace,
+          timestamp: nowIso,
+        };
+      }
+    }
+
+    const priceLimit = cond.maxPricePerCall ?? policy.maxPricePerCall;
+    if (priceLimit !== undefined && priceLimit > 0) {
+      if (policy.effect === "DENY" && context.amount > priceLimit) {
+        evaluationTrace.push({
+          stage: "PRICE_CEILING_CHECK",
+          status: "FAIL",
+          detail: `Call amount ${context.amount} HBAR exceeds price ceiling of ${priceLimit} HBAR in DENY policy '${policy.name}'`,
+          timestamp: nowIso,
+        });
+        return {
+          allowed: false,
+          decisionId,
+          outcome: "DENIED",
+          reasonCode: "PRICE_LIMIT_EXCEEDED",
+          primaryReason: `Amount ${context.amount} HBAR exceeds maximum price ceiling of ${priceLimit} HBAR enforced by '${policy.name}'`,
+          matchedPolicyId: policy.id,
+          matchedPolicyName: policy.name,
+          matchedPolicyVersion: policy.version,
+          evaluationTrace,
+          timestamp: nowIso,
+        };
+      }
+      if (policy.effect === "ALLOW" && context.amount > priceLimit) {
+        evaluationTrace.push({
+          stage: "PRICE_CEILING_CHECK",
+          status: "FAIL",
+          detail: `Call amount ${context.amount} HBAR exceeds allow threshold of ${priceLimit} HBAR in policy '${policy.name}'`,
+          timestamp: nowIso,
+        });
+        return {
+          allowed: false,
+          decisionId,
+          outcome: "DENIED",
+          reasonCode: "PRICE_LIMIT_EXCEEDED",
+          primaryReason: `Amount ${context.amount} HBAR exceeds allowed price ceiling of ${priceLimit} HBAR in '${policy.name}'`,
+          matchedPolicyId: policy.id,
+          matchedPolicyName: policy.name,
+          matchedPolicyVersion: policy.version,
+          evaluationTrace,
+          timestamp: nowIso,
+        };
+      }
+    }
+
+    if (cond.maxCallsPerMinute !== undefined && cond.maxCallsPerMinute > 0) {
+      const key = `${context.agentId}:${context.serviceAddress}`;
+      const timestamps = velocityMap.get(key) || [];
+      const oneMinAgo = Date.now() - 60000;
+      const recent = timestamps.filter((t) => t > oneMinAgo);
+      if (recent.length >= cond.maxCallsPerMinute) {
+        evaluationTrace.push({
+          stage: "VELOCITY_CHECK",
+          status: "FAIL",
+          detail: `Velocity limit exceeded: ${recent.length} calls in last 60s (max: ${cond.maxCallsPerMinute})`,
+          timestamp: nowIso,
+        });
+        return {
+          allowed: false,
+          decisionId,
+          outcome: "DENIED",
+          reasonCode: "VELOCITY_LIMIT_EXCEEDED",
+          primaryReason: `Velocity rate limit exceeded (${recent.length}/${cond.maxCallsPerMinute} calls/min) enforced by policy '${policy.name}'`,
+          matchedPolicyId: policy.id,
+          matchedPolicyName: policy.name,
+          matchedPolicyVersion: policy.version,
+          evaluationTrace,
+          timestamp: nowIso,
+        };
+      }
+    }
+
+    if (policy.effect === "DENY") {
+      evaluationTrace.push({
+        stage: "POLICY_RESOLUTION",
+        status: "FAIL",
+        detail: `Explicit DENY rule triggered by policy '${policy.name}' (priority: ${policy.priority})`,
+        timestamp: nowIso,
+      });
+      return {
+        allowed: false,
+        decisionId,
+        outcome: "DENIED",
+        reasonCode: "POLICY_DENIED",
+        primaryReason: `Explicit DENY policy rule '${policy.name}' matched and rejected authorization`,
+        matchedPolicyId: policy.id,
+        matchedPolicyName: policy.name,
+        matchedPolicyVersion: policy.version,
+        evaluationTrace,
+        timestamp: nowIso,
+      };
+    }
+
+    evaluationTrace.push({
+      stage: "POLICY_MATCH",
+      status: "PASS",
+      detail: `Policy '${policy.name}' (ALLOW, priority ${policy.priority}) passed all conditions`,
+      timestamp: nowIso,
+    });
+  }
+
+  evaluationTrace.push({
+    stage: "POLICY_RESOLUTION",
+    status: "PASS",
+    detail: "All applicable policy checks completed successfully",
+    timestamp: nowIso,
+  });
+
+  return {
+    allowed: true,
+    decisionId,
+    outcome: "ALLOWED",
+    reasonCode: "AUTHORIZED",
+    primaryReason: "All applicable policy checks passed successfully",
+    matchedPolicyId: activePolicies[0].id,
+    matchedPolicyName: activePolicies[0].name,
+    matchedPolicyVersion: activePolicies[0].version,
+    evaluationTrace,
+    timestamp: nowIso,
+  };
+}
+
 function mockCreatePolicy(body: Partial<Policy>): Policy {
   const id = uid("pol_");
+  const now = new Date().toISOString();
+  const maxPrice = Number(body.maxPricePerCall || body.conditions?.maxPricePerCall) || 10;
+  const budget = Number(body.dailyBudget || body.conditions?.dailyBudget) || 50;
+
   const policy: Policy = {
     id,
     name: body.name || "Unnamed Policy",
+    description: body.description || "",
+    enabled: body.enabled !== false,
+    effect: body.effect || "ALLOW",
+    priority: body.priority ?? 100,
     serviceEndpoint: body.serviceEndpoint || "/api/metered-service",
-    serviceAddress: body.serviceAddress || "0x0000000000000000000000000000000000000004",
-    maxPricePerCall: Number(body.maxPricePerCall) || 10,
-    dailyBudget: Number(body.dailyBudget) || 50,
+    serviceAddress: body.serviceAddress || "*",
+    maxPricePerCall: maxPrice,
+    dailyBudget: budget,
     ttlSeconds: Number(body.ttlSeconds) || 3600,
-    createdAt: new Date().toISOString(),
+    conditions: body.conditions || {
+      maxPricePerCall: maxPrice,
+      dailyBudget: budget,
+    },
+    applicableAgents: body.applicableAgents,
+    applicableServices: body.applicableServices,
+    applicableActions: body.applicableActions,
+    version: 1,
+    createdAt: now,
+    updatedAt: now,
   };
   mockStore.policies.set(id, policy);
   return policy;
@@ -628,6 +1016,74 @@ function mockExecuteMeteredCall(
     };
   }
 
+  // Stage 6: Deterministic Policy Engine Evaluation
+  const evalResult = mockEvaluatePolicies({
+    agentId: cap.agentId || "agent_alpha",
+    serviceAddress: cap.serviceAddress,
+    action: requestedAction,
+    resource: requestedResource,
+    amount,
+    policyId: cap.policyId,
+  });
+
+  if (!evalResult.allowed) {
+    mockStore.auditFeed.unshift({
+      type: "POLICY_EVALUATED",
+      capId,
+      agentId: cap.agentId || "agent_alpha",
+      agentName: agent?.name || "Agent Alpha (Summarizer)",
+      policyId: evalResult.matchedPolicyId,
+      policyName: evalResult.matchedPolicyName,
+      decisionId: evalResult.decisionId,
+      outcome: "DENIED",
+      reasonCode: evalResult.reasonCode,
+      reason: evalResult.primaryReason,
+      amount,
+      timestamp: nowStr,
+    });
+
+    const policyDeniedPayment: PaymentAttempt = {
+      id: uid("pay_"),
+      capId,
+      agentId: cap.agentId || "agent_alpha",
+      agentName: agent?.name || "Agent Alpha (Summarizer)",
+      serviceAddress: cap.serviceAddress,
+      serviceName: "Vaultbreaker AI Text Summarizer API",
+      amount,
+      asset: "HBAR",
+      network: "Hedera Testnet (296)",
+      decision: "DENIED",
+      status: "REJECTED",
+      reason: evalResult.reasonCode,
+      evaluationTrace: [
+        { stage: "REQUEST_RECEIVED", status: "PASS", detail: "HTTP POST request received with token", timestamp: nowStr },
+        { stage: "CAPABILITY_RESOLVED", status: "PASS", detail: `Capability resolved: ${capId.slice(0, 10)}...`, timestamp: nowStr },
+        ...evalResult.evaluationTrace,
+      ],
+      timestamp: nowStr,
+      isDemoFixture: true,
+    };
+    mockStore.paymentAttempts.unshift(policyDeniedPayment);
+
+    return {
+      status: 403,
+      ok: false,
+      data: {
+        error: evalResult.reasonCode,
+        message: evalResult.primaryReason,
+        decisionId: evalResult.decisionId,
+        evaluation: evalResult,
+      },
+    };
+  }
+
+  // Record velocity for permitted execution
+  const velKey = `${cap.agentId || "agent_alpha"}:${cap.serviceAddress}`;
+  const nowMs = Date.now();
+  const times = velocityMap.get(velKey) || [];
+  times.push(nowMs);
+  velocityMap.set(velKey, times);
+
   if (cap.budgetRemaining < amount) {
     mockStore.auditFeed.unshift({
       type: "CAPABILITY_REJECTED",
@@ -654,7 +1110,7 @@ function mockExecuteMeteredCall(
       evaluationTrace: [
         { stage: "REQUEST_RECEIVED", status: "PASS", detail: "HTTP POST request received", timestamp: nowStr },
         { stage: "CAPABILITY_RESOLVED", status: "PASS", detail: `Capability resolved: ${capId.slice(0, 10)}...`, timestamp: nowStr },
-        { stage: "POLICY_EVALUATED", status: "PASS", detail: "Policy rules valid & active", timestamp: nowStr },
+        ...evalResult.evaluationTrace,
         { stage: "BUDGET_CHECKED", status: "FAIL", detail: `Requested ${amount} HBAR but remaining budget is ${cap.budgetRemaining} HBAR`, timestamp: nowStr },
       ],
       timestamp: nowStr,
@@ -700,7 +1156,7 @@ function mockExecuteMeteredCall(
     evaluationTrace: [
       { stage: "REQUEST_RECEIVED", status: "PASS", detail: "HTTP POST request received with token", timestamp: nowStr },
       { stage: "CAPABILITY_RESOLVED", status: "PASS", detail: `Capability resolved: ${capId.slice(0, 10)}...`, timestamp: nowStr },
-      { stage: "POLICY_EVALUATED", status: "PASS", detail: "Policy criteria met (expiry & revocation valid)", timestamp: nowStr },
+      ...evalResult.evaluationTrace,
       { stage: "BUDGET_CHECKED", status: "PASS", detail: `Budget decremented by ${amount} HBAR. Remaining: ${cap.budgetRemaining} HBAR`, timestamp: nowStr },
       { stage: "DECISION_RETURNED", status: "PASS", detail: "Execution allowed & Ledger credential decrypted in memory", timestamp: nowStr },
     ],
@@ -749,6 +1205,15 @@ export async function fetchPolicies(): Promise<Policy[]> {
   return Array.from(mockStore.policies.values());
 }
 
+export async function fetchPolicy(id: string): Promise<Policy | null> {
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/policies/${id}`);
+    if (!res.ok) return null;
+    return res.json();
+  }
+  return mockStore.policies.get(id) || null;
+}
+
 export async function createPolicy(policy: Partial<Policy>): Promise<Policy> {
   if (mockStore.brokerOnline) {
     const res = await fetch(`${BROKER_BASE_URL}/api/policies`, {
@@ -759,6 +1224,78 @@ export async function createPolicy(policy: Partial<Policy>): Promise<Policy> {
     return res.json();
   }
   return mockCreatePolicy(policy);
+}
+
+export async function updatePolicy(id: string, updates: Partial<Policy>): Promise<Policy> {
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/policies/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || `Failed to update policy (${res.status})`);
+    }
+    return res.json();
+  }
+  const policy = mockStore.policies.get(id);
+  if (!policy) throw new Error(`Policy ${id} not found`);
+  const updated: Policy = {
+    ...policy,
+    ...updates,
+    version: policy.version + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  mockStore.policies.set(id, updated);
+  mockStore.auditFeed.unshift({
+    type: "POLICY_UPDATED",
+    policyId: updated.id,
+    policyName: updated.name,
+    reason: `Policy updated to v${updated.version}`,
+    timestamp: new Date().toISOString(),
+  });
+  return updated;
+}
+
+export async function togglePolicy(id: string): Promise<Policy> {
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/policies/${id}/toggle`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message || `Failed to toggle policy (${res.status})`);
+    }
+    return res.json();
+  }
+  const policy = mockStore.policies.get(id);
+  if (!policy) throw new Error(`Policy ${id} not found`);
+  policy.enabled = !policy.enabled;
+  policy.version += 1;
+  policy.updatedAt = new Date().toISOString();
+  mockStore.auditFeed.unshift({
+    type: "POLICY_TOGGLED",
+    policyId: policy.id,
+    policyName: policy.name,
+    reason: `Policy ${policy.enabled ? "enabled" : "disabled"}`,
+    timestamp: new Date().toISOString(),
+  });
+  return policy;
+}
+
+export async function evaluatePolicyDryRun(
+  context: PolicyEvaluationContext
+): Promise<PolicyEvaluationResult> {
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/policies/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(context),
+    });
+    return res.json();
+  }
+  return mockEvaluatePolicies(context);
 }
 
 export async function issueCapability(

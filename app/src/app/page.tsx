@@ -252,6 +252,8 @@ export default function Home() {
             policies={policies}
             capabilities={capabilities}
             payments={payments}
+            agents={agents}
+            onRefresh={loadData}
             onNavigate={(tab) => setActiveTab(tab as NavTab)}
             onIssueTokenForPolicy={handleIssueTokenClick}
           />
