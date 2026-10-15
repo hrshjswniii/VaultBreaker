@@ -524,4 +524,339 @@ export class PolicyEngine {
     cap.revokedAt = new Date().toISOString();
     return true;
   }
+
+  /**
+   * Deterministically evaluates all applicable policies for an authorization request.
+   * Enforces priority ordering, condition checks, and explicit DENY precedence.
+   * Produces an explainable, structured authorization decision with full audit trace.
+   */
+  evaluatePolicies(context: PolicyEvaluationContext): PolicyEvaluationResult {
+    const decisionId = `dec_${crypto.randomBytes(8).toString("hex")}`;
+    const now = context.now || new Date();
+    const nowIso = now.toISOString();
+    const evaluationTrace: EvaluationStep[] = [];
+
+    // Stage 1: Validate Context Attributes
+    if (
+      !context.agentId ||
+      !context.serviceAddress ||
+      !context.action ||
+      !context.resource ||
+      context.amount == null ||
+      isNaN(context.amount) ||
+      context.amount <= 0
+    ) {
+      evaluationTrace.push({
+        stage: "CONTEXT_VALIDATION",
+        status: "FAIL",
+        detail: "Security context missing or malformed required evaluation attributes",
+        timestamp: nowIso,
+      });
+      return {
+        allowed: false,
+        decisionId,
+        outcome: "DENIED",
+        reasonCode: "POLICY_EVALUATION_FAILED",
+        primaryReason: "Malformed evaluation context: missing or invalid security inputs",
+        evaluationTrace,
+        timestamp: nowIso,
+      };
+    }
+
+    evaluationTrace.push({
+      stage: "CONTEXT_VALIDATION",
+      status: "PASS",
+      detail: `Evaluation context validated for Agent '${context.agentId}', Service '${context.serviceAddress}', Action '${context.action}', Amount '${context.amount}'`,
+      timestamp: nowIso,
+    });
+
+    // Stage 2: Policy Discovery & Applicability Filtering
+    const allPolicies = Array.from(this.policies.values());
+    const applicablePolicies: SpendPolicy[] = [];
+
+    for (const policy of allPolicies) {
+      // Disabled policies do not participate in evaluation
+      if (!policy.enabled) {
+        evaluationTrace.push({
+          stage: "APPLICABILITY_CHECK",
+          status: "SKIPPED",
+          detail: `Policy '${policy.name}' (${policy.id}) is DISABLED; skipped`,
+          timestamp: nowIso,
+        });
+        continue;
+      }
+
+      // Check agent applicability
+      if (
+        policy.applicableAgents &&
+        policy.applicableAgents.length > 0 &&
+        !policy.applicableAgents.includes(context.agentId) &&
+        !policy.applicableAgents.includes("*")
+      ) {
+        continue;
+      }
+
+      // Check service address applicability
+      if (policy.applicableServices && policy.applicableServices.length > 0) {
+        const matchesService = policy.applicableServices.some(
+          (s) => s === "*" || s.toLowerCase() === context.serviceAddress.toLowerCase()
+        );
+        if (!matchesService) {
+          continue;
+        }
+      } else if (
+        policy.serviceAddress &&
+        policy.serviceAddress !== "*" &&
+        policy.serviceAddress.toLowerCase() !== context.serviceAddress.toLowerCase()
+      ) {
+        continue;
+      }
+
+      // Check action applicability
+      if (
+        policy.applicableActions &&
+        policy.applicableActions.length > 0 &&
+        !policy.applicableActions.includes(context.action) &&
+        !policy.applicableActions.includes("*")
+      ) {
+        continue;
+      }
+
+      applicablePolicies.push(policy);
+    }
+
+    // Stage 3: No Applicable Policy Baseline Handling
+    if (applicablePolicies.length === 0) {
+      evaluationTrace.push({
+        stage: "POLICY_RESOLUTION",
+        status: "PASS",
+        detail: "No applicable policies found; capability baseline authority applies without policy override",
+        timestamp: nowIso,
+      });
+      return {
+        allowed: true,
+        decisionId,
+        outcome: "ALLOWED",
+        reasonCode: "AUTHORIZED",
+        primaryReason: "No applicable policy restrictions matched; capability baseline authority granted",
+        evaluationTrace,
+        timestamp: nowIso,
+      };
+    }
+
+    // Stage 4: Deterministic Policy Ordering (Priority DESC, ID ASC)
+    applicablePolicies.sort((a, b) => {
+      if (b.priority !== a.priority) return b.priority - a.priority;
+      return a.id.localeCompare(b.id);
+    });
+
+    evaluationTrace.push({
+      stage: "POLICY_RESOLUTION",
+      status: "PASS",
+      detail: `Resolved ${applicablePolicies.length} applicable policies in priority order: [${applicablePolicies.map((p) => `${p.name} (P:${p.priority})`).join(", ")}]`,
+      timestamp: nowIso,
+    });
+
+    // Stage 5: Rule & Condition Evaluation (Explicit DENY overrides ALLOW)
+    for (const policy of applicablePolicies) {
+      // 5.1 Explicit DENY Policy Effect
+      if (policy.effect === "DENY") {
+        evaluationTrace.push({
+          stage: "RULE_EVALUATION",
+          status: "FAIL",
+          detail: `Policy '${policy.name}' (${policy.id}) effect is DENY; explicit administrative prohibition applied`,
+          timestamp: nowIso,
+        });
+        return {
+          allowed: false,
+          decisionId,
+          outcome: "DENIED",
+          reasonCode: "POLICY_DENIED",
+          primaryReason: `Administrative policy '${policy.name}' explicitly prohibits execution`,
+          matchedPolicyId: policy.id,
+          matchedPolicyName: policy.name,
+          matchedPolicyVersion: policy.version,
+          evaluationTrace,
+          timestamp: nowIso,
+        };
+      }
+
+      // 5.2 Condition Check: Max Price Per Call
+      const maxPrice = policy.conditions?.maxPricePerCall ?? policy.maxPricePerCall;
+      if (maxPrice > 0 && context.amount > maxPrice) {
+        evaluationTrace.push({
+          stage: "RULE_EVALUATION",
+          status: "FAIL",
+          detail: `Requested amount (${context.amount}) exceeds policy '${policy.name}' max price per call limit (${maxPrice})`,
+          timestamp: nowIso,
+        });
+        return {
+          allowed: false,
+          decisionId,
+          outcome: "DENIED",
+          reasonCode: "PRICE_LIMIT_EXCEEDED",
+          primaryReason: `Requested amount of ${context.amount} exceeds policy ceiling of ${maxPrice}`,
+          matchedPolicyId: policy.id,
+          matchedPolicyName: policy.name,
+          matchedPolicyVersion: policy.version,
+          evaluationTrace,
+          timestamp: nowIso,
+        };
+      }
+
+      // 5.3 Condition Check: Blocked Actions
+      if (
+        policy.conditions?.blockedActions &&
+        policy.conditions.blockedActions.includes(context.action)
+      ) {
+        evaluationTrace.push({
+          stage: "RULE_EVALUATION",
+          status: "FAIL",
+          detail: `Action '${context.action}' is in blockedActions list of policy '${policy.name}'`,
+          timestamp: nowIso,
+        });
+        return {
+          allowed: false,
+          decisionId,
+          outcome: "DENIED",
+          reasonCode: "BLOCKED_ACTION",
+          primaryReason: `Action '${context.action}' is explicitly blocked by policy '${policy.name}'`,
+          matchedPolicyId: policy.id,
+          matchedPolicyName: policy.name,
+          matchedPolicyVersion: policy.version,
+          evaluationTrace,
+          timestamp: nowIso,
+        };
+      }
+
+      // 5.4 Condition Check: Blocked Resources
+      if (
+        policy.conditions?.blockedResources &&
+        policy.conditions.blockedResources.includes(context.resource)
+      ) {
+        evaluationTrace.push({
+          stage: "RULE_EVALUATION",
+          status: "FAIL",
+          detail: `Resource '${context.resource}' is in blockedResources list of policy '${policy.name}'`,
+          timestamp: nowIso,
+        });
+        return {
+          allowed: false,
+          decisionId,
+          outcome: "DENIED",
+          reasonCode: "BLOCKED_RESOURCE",
+          primaryReason: `Resource '${context.resource}' is explicitly blocked by policy '${policy.name}'`,
+          matchedPolicyId: policy.id,
+          matchedPolicyName: policy.name,
+          matchedPolicyVersion: policy.version,
+          evaluationTrace,
+          timestamp: nowIso,
+        };
+      }
+
+      // 5.5 Condition Check: Allowed UTC Hours Window
+      if (policy.conditions?.allowedHoursUtc) {
+        const { startHour, endHour } = policy.conditions.allowedHoursUtc;
+        const currentHour = now.getUTCHours();
+        const inWindow =
+          startHour <= endHour
+            ? currentHour >= startHour && currentHour < endHour
+            : currentHour >= startHour || currentHour < endHour;
+
+        if (!inWindow) {
+          evaluationTrace.push({
+            stage: "RULE_EVALUATION",
+            status: "FAIL",
+            detail: `Current UTC hour (${currentHour}) is outside policy '${policy.name}' window (${startHour}:00 - ${endHour}:00 UTC)`,
+            timestamp: nowIso,
+          });
+          return {
+            allowed: false,
+            decisionId,
+            outcome: "DENIED",
+            reasonCode: "TIME_WINDOW_VIOLATION",
+            primaryReason: `Current execution time (${currentHour}:00 UTC) violates policy '${policy.name}' allowed hours (${startHour}:00 - ${endHour}:00 UTC)`,
+            matchedPolicyId: policy.id,
+            matchedPolicyName: policy.name,
+            matchedPolicyVersion: policy.version,
+            evaluationTrace,
+            timestamp: nowIso,
+          };
+        }
+      }
+
+      // 5.6 Condition Check: Velocity Rate Limit (Calls Per Minute)
+      if (
+        policy.conditions?.maxCallsPerMinute &&
+        policy.conditions.maxCallsPerMinute > 0
+      ) {
+        const velocityKey = `${context.agentId}:${context.serviceAddress}`;
+        const history = this.velocityTracker.get(velocityKey) || [];
+        const nowMs = now.getTime();
+        const oneMinuteAgo = nowMs - 60000;
+        const recentCalls = history.filter((ts) => ts > oneMinuteAgo);
+
+        if (recentCalls.length >= policy.conditions.maxCallsPerMinute) {
+          evaluationTrace.push({
+            stage: "RULE_EVALUATION",
+            status: "FAIL",
+            detail: `Velocity limit exceeded: ${recentCalls.length} calls in last 60s exceeds limit of ${policy.conditions.maxCallsPerMinute}/min`,
+            timestamp: nowIso,
+          });
+          return {
+            allowed: false,
+            decisionId,
+            outcome: "DENIED",
+            reasonCode: "VELOCITY_LIMIT_EXCEEDED",
+            primaryReason: `Velocity limit exceeded: Agent has executed ${recentCalls.length} calls in 60s (limit: ${policy.conditions.maxCallsPerMinute}/min)`,
+            matchedPolicyId: policy.id,
+            matchedPolicyName: policy.name,
+            matchedPolicyVersion: policy.version,
+            evaluationTrace,
+            timestamp: nowIso,
+          };
+        }
+      }
+
+      evaluationTrace.push({
+        stage: "RULE_EVALUATION",
+        status: "PASS",
+        detail: `All conditions satisfied for policy '${policy.name}' (${policy.id})`,
+        timestamp: nowIso,
+      });
+    }
+
+    // All applicable policies approved the request
+    const primaryPolicy = applicablePolicies[0];
+    return {
+      allowed: true,
+      decisionId,
+      outcome: "ALLOWED",
+      reasonCode: "AUTHORIZED",
+      primaryReason: `Request approved under ${applicablePolicies.length} applicable policies`,
+      matchedPolicyId: primaryPolicy?.id,
+      matchedPolicyName: primaryPolicy?.name,
+      matchedPolicyVersion: primaryPolicy?.version,
+      evaluationTrace,
+      timestamp: nowIso,
+    };
+  }
+
+  /**
+   * Records a timestamp in the velocity tracker ONLY after final authorization and settlement.
+   * Prevents dry runs or denied requests from counting against rate limits.
+   */
+  recordVelocity(context: PolicyEvaluationContext): void {
+    const now = context.now ? context.now.getTime() : Date.now();
+    const velocityKey = `${context.agentId}:${context.serviceAddress}`;
+    const history = this.velocityTracker.get(velocityKey) || [];
+    const oneMinuteAgo = now - 60000;
+    const cleanHistory = history.filter((ts) => ts > oneMinuteAgo);
+    cleanHistory.push(now);
+    this.velocityTracker.set(velocityKey, cleanHistory);
+  }
+
+  clearVelocityTracker(): void {
+    this.velocityTracker.clear();
+  }
 }
