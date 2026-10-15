@@ -137,27 +137,88 @@ export function createApiRouter(
     }
   });
 
-  // 3. Policies API
+  // 3. Policies API (Phase 6 Deterministic Policy Engine & Management)
   router.get("/policies", (req: Request, res: Response) => {
     res.json(policyEngine.listPolicies());
   });
 
-  router.post("/policies", (req: Request, res: Response) => {
+  router.get("/policies/:id", (req: Request, res: Response) => {
+    const policy = policyEngine.getPolicy(req.params.id);
+    if (!policy) {
+      return res.status(404).json({ error: "POLICY_NOT_FOUND", message: `Policy '${req.params.id}' not found.` });
+    }
+    res.json(policy);
+  });
+
+  router.post("/policies", async (req: Request, res: Response) => {
     try {
-      const { name, serviceEndpoint, serviceAddress, maxPricePerCall, dailyBudget, ttlSeconds } = req.body;
-      const policy = policyEngine.registerPolicy({
-        name,
-        serviceEndpoint,
-        serviceAddress,
-        maxPricePerCall: Number(maxPricePerCall),
-        dailyBudget: Number(dailyBudget),
-        ttlSeconds: Number(ttlSeconds),
+      const policy = policyEngine.registerPolicy(req.body);
+      await hcsLogger.logAuditEvent({
+        type: "POLICY_REGISTERED",
+        policyId: policy.id,
+        policyName: policy.name,
+        reason: `Policy registered with effect ${policy.effect} and priority ${policy.priority}`,
+        timestamp: new Date().toISOString(),
       });
       res.status(201).json(policy);
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: "VALIDATION_ERROR", message: err.message });
     }
   });
+
+  router.patch("/policies/:id", async (req: Request, res: Response) => {
+    try {
+      const policy = policyEngine.updatePolicy(req.params.id, req.body);
+      await hcsLogger.logAuditEvent({
+        type: "POLICY_UPDATED",
+        policyId: policy.id,
+        policyName: policy.name,
+        reason: `Policy updated to revision v${policy.version}`,
+        timestamp: new Date().toISOString(),
+      });
+      res.json(policy);
+    } catch (err: any) {
+      const status = err.message.startsWith("NOT_FOUND:") ? 404 : 400;
+      res.status(status).json({ error: "UPDATE_ERROR", message: err.message });
+    }
+  });
+
+  router.post("/policies/:id/toggle", async (req: Request, res: Response) => {
+    try {
+      const { enabled } = req.body;
+      const policy = policyEngine.togglePolicy(req.params.id, enabled);
+      await hcsLogger.logAuditEvent({
+        type: "POLICY_TOGGLED",
+        policyId: policy.id,
+        policyName: policy.name,
+        newStatus: policy.enabled ? "ENABLED" : "DISABLED",
+        reason: `Policy state changed to ${policy.enabled ? "ENABLED" : "DISABLED"} (v${policy.version})`,
+        timestamp: new Date().toISOString(),
+      });
+      res.json(policy);
+    } catch (err: any) {
+      const status = err.message.startsWith("NOT_FOUND:") ? 404 : 400;
+      res.status(status).json({ error: "TOGGLE_ERROR", message: err.message });
+    }
+  });
+
+  router.post("/policies/evaluate", (req: Request, res: Response) => {
+    try {
+      const { agentId, serviceAddress, action, resource, amount, policyId } = req.body;
+      const result = policyEngine.evaluatePolicies({
+        agentId: agentId || "agent_alpha",
+        serviceAddress: serviceAddress || "0x0000000000000000000000000000000000000004",
+        action: action || "EXECUTE_METERED_SERVICE",
+        resource: resource || "/api/metered-service",
+        amount: Number(amount || 10),
+        policyId,
+      });
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: "EVALUATION_ERROR", message: err.message });
+    }
+  });
+
 
   // 4. Issue Capability Token (Phase 5 Canonical Permission & Scope Management)
   router.post("/capabilities/issue", async (req: Request, res: Response) => {
@@ -349,12 +410,20 @@ export function createApiRouter(
     const paymentAmountHeader = (req.headers["x-payment-amount"] as string) || "10";
     const amountToSpend = Number(paymentAmountHeader);
 
+    if (isNaN(amountToSpend) || amountToSpend <= 0) {
+      return res.status(400).json({
+        error: "INVALID_AMOUNT",
+        message: "Payment amount must be a positive integer.",
+      });
+    }
+
     if (!authHeader) {
       return res.status(401).json({
         error: "UNAUTHORIZED",
         message: "Missing 'x-capability-token' header. Raw API requests without scoped capabilities are rejected.",
       });
     }
+
 
     let decoded: any;
     try {
@@ -573,7 +642,49 @@ export function createApiRouter(
     }
 
     // =========================================================================
-    // 6. EXACT BUDGET LIMIT ENFORCEMENT & DEDUCTION
+    // 6. PHASE 6 POLICY ENGINE EVALUATION (Least-Privilege Administrative Guardrails)
+    // =========================================================================
+    const policyDecision = policyEngine.evaluatePolicies({
+      agentId: authoritativeAgentId,
+      serviceAddress: capability.serviceAddress,
+      action: requestedAction,
+      resource: targetResource,
+      amount: amountToSpend,
+      policyId: capability.policyId,
+    });
+
+    if (!policyDecision.allowed) {
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
+      await hcsLogger.logAuditEvent({
+        type: "CAPABILITY_REJECTED",
+        capId,
+        agentId: authoritativeAgentId,
+        amount: amountToSpend,
+        policyId: policyDecision.matchedPolicyId,
+        policyName: policyDecision.matchedPolicyName,
+        decisionId: policyDecision.decisionId,
+        reasonCode: policyDecision.reasonCode,
+        reason: policyDecision.primaryReason,
+        timestamp: new Date().toISOString(),
+      });
+
+      return res.status(403).json({
+        error: policyDecision.reasonCode,
+        capId,
+        decisionId: policyDecision.decisionId,
+        outcome: policyDecision.outcome,
+        reasonCode: policyDecision.reasonCode,
+        primaryReason: policyDecision.primaryReason,
+        matchedPolicyId: policyDecision.matchedPolicyId,
+        matchedPolicyName: policyDecision.matchedPolicyName,
+        matchedPolicyVersion: policyDecision.matchedPolicyVersion,
+        evaluationTrace: policyDecision.evaluationTrace,
+        message: `Authorization Gate: Policy evaluation rejected request: ${policyDecision.primaryReason}`,
+      });
+    }
+
+    // =========================================================================
+    // 7. EXACT BUDGET LIMIT ENFORCEMENT & DEDUCTION
     // =========================================================================
     if (isNaN(amountToSpend) || amountToSpend <= 0) {
       return res.status(400).json({
@@ -606,6 +717,15 @@ export function createApiRouter(
     // Execute atomic memory budget decrement
     const remainingAfterSpend = policyEngine.decrementMemoryBudget(capId, amountToSpend);
 
+    // Record velocity only on final approved spend
+    policyEngine.recordVelocity({
+      agentId: authoritativeAgentId,
+      serviceAddress: capability.serviceAddress,
+      action: requestedAction,
+      resource: targetResource,
+      amount: amountToSpend,
+    });
+
     // Decrypt settlement credential in memory using Ledger Key Ring (credential never leaves broker)
     await keyring.decryptCredential(capability.encryptedCredential);
 
@@ -620,12 +740,15 @@ export function createApiRouter(
       service: capability.serviceAddress,
       amount: amountToSpend,
       budgetRemaining: remainingAfterSpend,
+      policyId: policyDecision.matchedPolicyId,
+      policyName: policyDecision.matchedPolicyName,
+      decisionId: policyDecision.decisionId,
       timestamp: new Date().toISOString(),
     });
 
     const promptText = req.body.prompt || "Default input prompt";
 
-    // Return Gated Response + Micropayment Audit receipt
+    // Return Gated Response + Policy Decision Trace + Micropayment Audit receipt
     res.json({
       status: "SUCCESS",
       capId,
@@ -635,6 +758,15 @@ export function createApiRouter(
       resource: targetResource,
       amountCharged: amountToSpend,
       budgetRemaining: remainingAfterSpend,
+      decisionId: policyDecision.decisionId,
+      policyDecision: {
+        outcome: policyDecision.outcome,
+        reasonCode: policyDecision.reasonCode,
+        matchedPolicyId: policyDecision.matchedPolicyId,
+        matchedPolicyName: policyDecision.matchedPolicyName,
+        matchedPolicyVersion: policyDecision.matchedPolicyVersion,
+      },
+      evaluationTrace: policyDecision.evaluationTrace,
       hcsAuditMessage: hcsResult.message,
       data: {
         service: "Vaultbreaker AI Text Summarizer",
