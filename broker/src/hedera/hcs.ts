@@ -9,7 +9,11 @@ export interface HCSAuditEvent {
     | "CAPABILITY_REVOKED"
     | "AGENT_REGISTERED"
     | "AGENT_STATUS_CHANGED"
-    | "AGENT_AUTHORIZATION_DENIED";
+    | "AGENT_AUTHORIZATION_DENIED"
+    | "POLICY_REGISTERED"
+    | "POLICY_UPDATED"
+    | "POLICY_TOGGLED"
+    | "POLICY_EVALUATED";
   capId?: string;
   agentId?: string;
   agentName?: string;
@@ -19,7 +23,12 @@ export interface HCSAuditEvent {
   amount?: number;
   budgetRemaining?: number;
   reason?: string;
+  policyId?: string;
+  policyName?: string;
   policyHash?: string;
+  decisionId?: string;
+  outcome?: string;
+  reasonCode?: string;
   timestamp: string;
   txHash?: string;
 }
