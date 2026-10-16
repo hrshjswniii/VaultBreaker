@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { LedgerKeyRing } from "../ledger/keyring.js";
 
-export type PolicyEffect = "ALLOW" | "DENY";
+export type PolicyEffect = "ALLOW" | "DENY" | "APPROVAL_REQUIRED";
 
 export interface PolicyConditions {
   maxPricePerCall?: number; // Ceiling per call (e.g. 10 HBAR)
@@ -12,6 +12,9 @@ export interface PolicyConditions {
   allowedHoursUtc?: { startHour: number; endHour: number }; // Time window (0-23 UTC)
   blockedActions?: string[]; // Explicitly blocked action names
   blockedResources?: string[]; // Explicitly blocked endpoint paths
+  requireApprovalAbove?: number; // Threshold: calls above this amount trigger APPROVAL_REQUIRED
+  requireApproval?: boolean; // If true, all matching calls trigger APPROVAL_REQUIRED
+  approvalTimeoutSeconds?: number; // Expiration TTL for pending approval request (default: 900s)
 }
 
 export interface SpendPolicy {
@@ -37,7 +40,7 @@ export interface SpendPolicy {
 
 export interface EvaluationStep {
   stage: string;
-  status: "PASS" | "FAIL" | "SKIPPED";
+  status: "PASS" | "FAIL" | "SKIPPED" | "PENDING";
   detail: string;
   timestamp: string;
 }
@@ -50,15 +53,18 @@ export interface PolicyEvaluationContext {
   amount: number;
   policyId?: string;
   now?: Date;
+  approvalVerified?: boolean;
+  approvedPolicyId?: string;
 }
 
 export interface PolicyEvaluationResult {
   allowed: boolean;
   decisionId: string;
-  outcome: "ALLOWED" | "DENIED";
+  outcome: "ALLOWED" | "DENIED" | "APPROVAL_REQUIRED";
   reasonCode:
     | "AUTHORIZED"
     | "POLICY_DENIED"
+    | "APPROVAL_REQUIRED"
     | "PRICE_LIMIT_EXCEEDED"
     | "VELOCITY_LIMIT_EXCEEDED"
     | "TIME_WINDOW_VIOLATION"
@@ -70,6 +76,9 @@ export interface PolicyEvaluationResult {
   matchedPolicyId?: string;
   matchedPolicyName?: string;
   matchedPolicyVersion?: number;
+  requiresApproval?: boolean;
+  approvalThreshold?: number;
+  approvalTimeoutSeconds?: number;
   evaluationTrace: EvaluationStep[];
   timestamp: string;
 }
@@ -211,15 +220,36 @@ export class PolicyEngine {
       }
     }
 
-    const id = `pol_${crypto.randomBytes(6).toString("hex")}`;
+    if (policy.conditions?.requireApprovalAbove !== undefined) {
+      const threshold = Number(policy.conditions.requireApprovalAbove);
+      if (isNaN(threshold) || threshold < 0) {
+        throw new Error("VALIDATION_ERROR: 'requireApprovalAbove' must be a non-negative number");
+      }
+    }
+
+    if (policy.conditions?.approvalTimeoutSeconds !== undefined) {
+      const timeout = Number(policy.conditions.approvalTimeoutSeconds);
+      if (isNaN(timeout) || timeout <= 0) {
+        throw new Error("VALIDATION_ERROR: 'approvalTimeoutSeconds' must be a positive integer");
+      }
+    }
+
+    const id = policy.id?.trim() || `pol_${crypto.randomBytes(6).toString("hex")}`;
     const nowIso = new Date().toISOString();
+
+    const effect: PolicyEffect =
+      policy.effect === "DENY"
+        ? "DENY"
+        : policy.effect === "APPROVAL_REQUIRED"
+        ? "APPROVAL_REQUIRED"
+        : "ALLOW";
 
     const newPolicy: SpendPolicy = {
       id,
       name: policy.name.trim(),
       description: policy.description?.trim(),
       enabled: policy.enabled !== undefined ? Boolean(policy.enabled) : true,
-      effect: policy.effect === "DENY" ? "DENY" : "ALLOW",
+      effect,
       priority: Number(policy.priority ?? 100),
       serviceEndpoint,
       serviceAddress,
@@ -291,7 +321,14 @@ export class PolicyEngine {
     if (updates.name !== undefined) existing.name = updates.name.trim();
     if (updates.description !== undefined) existing.description = updates.description.trim();
     if (updates.enabled !== undefined) existing.enabled = Boolean(updates.enabled);
-    if (updates.effect !== undefined) existing.effect = updates.effect === "DENY" ? "DENY" : "ALLOW";
+    if (updates.effect !== undefined) {
+      existing.effect =
+        updates.effect === "DENY"
+          ? "DENY"
+          : updates.effect === "APPROVAL_REQUIRED"
+          ? "APPROVAL_REQUIRED"
+          : "ALLOW";
+    }
     if (updates.serviceEndpoint !== undefined) existing.serviceEndpoint = updates.serviceEndpoint.trim();
     if (updates.serviceAddress !== undefined) existing.serviceAddress = updates.serviceAddress.trim();
     if (updates.conditions !== undefined) existing.conditions = updates.conditions;
@@ -812,6 +849,63 @@ export class PolicyEngine {
             matchedPolicyId: policy.id,
             matchedPolicyName: policy.name,
             matchedPolicyVersion: policy.version,
+            evaluationTrace,
+            timestamp: nowIso,
+          };
+        }
+      }
+
+      // 5.7 Condition Check: Human Approval Escalation
+      let requiresApproval = false;
+      if (
+        policy.conditions?.requireApprovalAbove !== undefined &&
+        context.amount > policy.conditions.requireApprovalAbove
+      ) {
+        requiresApproval = true;
+      } else if (
+        policy.conditions?.requireApprovalAbove === undefined &&
+        (policy.effect === "APPROVAL_REQUIRED" || policy.conditions?.requireApproval === true)
+      ) {
+        requiresApproval = true;
+      }
+
+      if (requiresApproval) {
+        if (
+          context.approvalVerified === true &&
+          (!context.approvedPolicyId || context.approvedPolicyId === policy.id)
+        ) {
+          evaluationTrace.push({
+            stage: "APPROVAL_ESCALATION_CHECK",
+            status: "PASS",
+            detail: `Human approval verified for policy '${policy.name}' (${policy.id}); escalation condition satisfied`,
+            timestamp: nowIso,
+          });
+        } else {
+          evaluationTrace.push({
+            stage: "APPROVAL_ESCALATION_CHECK",
+            status: "PENDING",
+            detail: `Execution requires human approval: ${
+              policy.conditions?.requireApprovalAbove !== undefined
+                ? `Amount (${context.amount}) exceeds auto-approval threshold (${policy.conditions.requireApprovalAbove})`
+                : `Policy '${policy.name}' (${policy.id}) explicitly mandates human approval`
+            }`,
+            timestamp: nowIso,
+          });
+          return {
+            allowed: false,
+            decisionId,
+            outcome: "APPROVAL_REQUIRED",
+            reasonCode: "APPROVAL_REQUIRED",
+            primaryReason:
+              policy.conditions?.requireApprovalAbove !== undefined
+                ? `Transaction amount of ${context.amount} exceeds automated approval threshold (${policy.conditions.requireApprovalAbove})`
+                : `Policy '${policy.name}' explicitly mandates human approval before execution`,
+            matchedPolicyId: policy.id,
+            matchedPolicyName: policy.name,
+            matchedPolicyVersion: policy.version,
+            requiresApproval: true,
+            approvalThreshold: policy.conditions?.requireApprovalAbove,
+            approvalTimeoutSeconds: policy.conditions?.approvalTimeoutSeconds ?? 900,
             evaluationTrace,
             timestamp: nowIso,
           };
