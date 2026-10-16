@@ -5,6 +5,7 @@ import { LedgerKeyRing } from "./ledger/keyring.js";
 import { HederaHCSLogger } from "./hedera/hcs.js";
 import { PolicyEngine } from "./policy/engine.js";
 import { AgentRegistry } from "./agent/registry.js";
+import { ApprovalStore } from "./approval/store.js";
 import { createApiRouter } from "./api/routes.js";
 
 dotenv.config({ path: "../.env" });
@@ -19,8 +20,9 @@ const keyring = new LedgerKeyRing();
 const hcsLogger = new HederaHCSLogger();
 const policyEngine = new PolicyEngine(keyring);
 const agentRegistry = new AgentRegistry();
+const approvalStore = new ApprovalStore();
 
-app.use("/api", createApiRouter(keyring, hcsLogger, policyEngine, agentRegistry));
+app.use("/api", createApiRouter(keyring, hcsLogger, policyEngine, agentRegistry, approvalStore));
 
 app.listen(PORT, async () => {
   console.log(`=======================================================`);

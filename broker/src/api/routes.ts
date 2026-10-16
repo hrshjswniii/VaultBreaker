@@ -3,13 +3,15 @@ import { LedgerKeyRing } from "../ledger/keyring.js";
 import { HederaHCSLogger } from "../hedera/hcs.js";
 import { PolicyEngine, getCapabilityStatus } from "../policy/engine.js";
 import { AgentRegistry, AgentStatus } from "../agent/registry.js";
+import { ApprovalStore, computeRequestFingerprint } from "../approval/store.js";
 import { ethers } from "ethers";
 
 export function createApiRouter(
   keyring: LedgerKeyRing,
   hcsLogger: HederaHCSLogger,
   policyEngine: PolicyEngine,
-  agentRegistry: AgentRegistry
+  agentRegistry: AgentRegistry,
+  approvalStore: ApprovalStore = new ApprovalStore()
 ): Router {
   const router = Router();
 
@@ -404,9 +406,220 @@ export function createApiRouter(
     }
   });
 
-  // 7. x402-Gated Metered Service Endpoint with Server-Side Scope, Action & Lifecycle Enforcement
+  // =========================================================================
+  // OPERATOR AUTHENTICATION BOUNDARY (Phase 7 Security Specification)
+  // =========================================================================
+  // Inspect server configuration: External IdP token or local demo mode
+  const OPERATOR_TOKEN = process.env.VAULTBREAKER_OPERATOR_TOKEN || process.env.OPERATOR_SECRET_KEY;
+  const IS_DEMO_MODE = !OPERATOR_TOKEN;
+
+  function verifyOperatorAuth(req: Request): { authorized: boolean; approverId: string; mode: string; reason?: string } {
+    if (IS_DEMO_MODE) {
+      // In development/demo mode, trusted external IdP is not configured.
+      // We assign authoritative identity "operator_demo_local" and ignore any caller-supplied "approvedBy" in req.body.
+      return {
+        authorized: true,
+        approverId: "operator_demo_local",
+        mode: "DEVELOPMENT_DEMO_MODE",
+      };
+    }
+
+    const authHeader = req.headers["authorization"] || req.headers["x-operator-key"];
+    if (!authHeader) {
+      return {
+        authorized: false,
+        approverId: "",
+        mode: "PRODUCTION_AUTH_ENFORCED",
+        reason: "Missing operator authorization token ('authorization' or 'x-operator-key' header).",
+      };
+    }
+
+    const token = (typeof authHeader === "string" && authHeader.startsWith("Bearer "))
+      ? authHeader.slice(7).trim()
+      : String(authHeader).trim();
+
+    if (token !== OPERATOR_TOKEN) {
+      return {
+        authorized: false,
+        approverId: "",
+        mode: "PRODUCTION_AUTH_ENFORCED",
+        reason: "Invalid operator authorization token.",
+      };
+    }
+
+    return {
+      authorized: true,
+      approverId: "operator_authenticated",
+      mode: "PRODUCTION_AUTH_ENFORCED",
+    };
+  }
+
+  // =========================================================================
+  // 7. APPROVALS API (Phase 7 Canonical Escalation & Approval Lifecycle)
+  // =========================================================================
+  router.get("/approvals", (req: Request, res: Response) => {
+    const { status, agentId, limit } = req.query;
+    const requests = approvalStore.listRequests({
+      status: status as any,
+      agentId: agentId as string,
+      limit: limit ? Number(limit) : undefined,
+    });
+    res.json(requests);
+  });
+
+  router.get("/approvals/status/security-boundary", (req: Request, res: Response) => {
+    res.json({
+      mode: IS_DEMO_MODE ? "DEVELOPMENT_DEMO_MODE" : "PRODUCTION_AUTH_ENFORCED",
+      authMechanism: IS_DEMO_MODE ? "DEMO_FALLBACK_IDENTIFIER" : "OPERATOR_SECRET_TOKEN",
+      trustedIdentityEnforced: !IS_DEMO_MODE,
+      notice: "Phase 7 establishes cryptographic request binding, deterministic state machine, and replay protection. External IdP (OIDC/SAML) is required before deploying production human identity.",
+    });
+  });
+
+  router.get("/approvals/:id", (req: Request, res: Response) => {
+    const { id } = req.params;
+    const request = approvalStore.getRequest(id);
+    if (!request) {
+      return res.status(404).json({
+        error: "APPROVAL_NOT_FOUND",
+        message: `Approval request '${id}' not found.`,
+      });
+    }
+    res.json(request);
+  });
+
+  router.post("/approvals/:id/approve", async (req: Request, res: Response) => {
+    const auth = verifyOperatorAuth(req);
+    if (!auth.authorized) {
+      return res.status(401).json({
+        error: "UNAUTHORIZED_OPERATOR",
+        message: auth.reason || "Operator authorization required.",
+        mode: auth.mode,
+      });
+    }
+
+    const { id } = req.params;
+    // Authoritative approver identity derived from verified server auth - never trust client body
+    const authoritativeApproverId = auth.approverId;
+
+    try {
+      const approval = approvalStore.approve(id, authoritativeApproverId);
+
+      await hcsLogger.logAuditEvent({
+        type: "APPROVAL_GRANTED",
+        approvalId: approval.id,
+        agentId: approval.agentId,
+        capId: approval.capId,
+        amount: approval.requestedAmount,
+        approverId: authoritativeApproverId,
+        requestFingerprint: approval.requestFingerprint,
+        timestamp: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        approval,
+        mode: auth.mode,
+        message: `Approval request '${id}' granted by authoritative operator.`,
+      });
+    } catch (err: any) {
+      const msg = err.message || "Failed to approve request";
+      const statusCode = msg.includes("APPROVAL_EXPIRED") ? 403 :
+                         (msg.includes("INVALID_STATE_TRANSITION") || msg.includes("INVALID_TRANSITION")) ? 409 : 400;
+      res.status(statusCode).json({
+        error: statusCode === 403 ? "APPROVAL_EXPIRED" : statusCode === 409 ? "INVALID_TRANSITION" : "BAD_REQUEST",
+        message: msg,
+      });
+    }
+  });
+
+  router.post("/approvals/:id/reject", async (req: Request, res: Response) => {
+    const auth = verifyOperatorAuth(req);
+    if (!auth.authorized) {
+      return res.status(401).json({
+        error: "UNAUTHORIZED_OPERATOR",
+        message: auth.reason || "Operator authorization required.",
+        mode: auth.mode,
+      });
+    }
+
+    const { id } = req.params;
+    const { reason } = req.body;
+    const authoritativeApproverId = auth.approverId;
+
+    if (!reason || typeof reason !== "string" || !reason.trim()) {
+      return res.status(400).json({
+        error: "REASON_REQUIRED",
+        message: "Rejection requires an explicit human-readable reason.",
+      });
+    }
+
+    try {
+      const approval = approvalStore.reject(id, authoritativeApproverId, reason.trim());
+
+      await hcsLogger.logAuditEvent({
+        type: "APPROVAL_REJECTED",
+        approvalId: approval.id,
+        agentId: approval.agentId,
+        capId: approval.capId,
+        amount: approval.requestedAmount,
+        approverId: authoritativeApproverId,
+        reason: reason.trim(),
+        timestamp: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        approval,
+        mode: auth.mode,
+        message: `Approval request '${id}' rejected by authoritative operator.`,
+      });
+    } catch (err: any) {
+      const msg = err.message || "Failed to reject request";
+      const statusCode = (msg.includes("INVALID_STATE_TRANSITION") || msg.includes("INVALID_TRANSITION")) ? 409 : 400;
+      res.status(statusCode).json({
+        error: statusCode === 409 ? "INVALID_TRANSITION" : "BAD_REQUEST",
+        message: msg,
+      });
+    }
+  });
+
+  router.post("/approvals/:id/cancel", async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    try {
+      const approval = approvalStore.cancel(id, reason || "Cancelled by workflow initiator");
+
+      await hcsLogger.logAuditEvent({
+        type: "APPROVAL_CANCELLED",
+        approvalId: approval.id,
+        agentId: approval.agentId,
+        capId: approval.capId,
+        amount: approval.requestedAmount,
+        reason: reason || "Cancelled by workflow initiator",
+        timestamp: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        approval,
+        message: `Approval request '${id}' cancelled.`,
+      });
+    } catch (err: any) {
+      const msg = err.message || "Failed to cancel request";
+      const statusCode = (msg.includes("INVALID_STATE_TRANSITION") || msg.includes("INVALID_TRANSITION")) ? 409 : 400;
+      res.status(statusCode).json({
+        error: statusCode === 409 ? "INVALID_TRANSITION" : "BAD_REQUEST",
+        message: msg,
+      });
+    }
+  });
+
+  // 8. x402-Gated Metered Service Endpoint with Server-Side Scope, Action & Lifecycle Enforcement
   router.post("/metered-service", async (req: Request, res: Response) => {
     const authHeader = req.headers["x-capability-token"] as string;
+    const approvalId = (req.headers["x-approval-id"] as string) || req.body.approvalId;
     const paymentAmountHeader = (req.headers["x-payment-amount"] as string) || "10";
     const amountToSpend = Number(paymentAmountHeader);
 
@@ -642,8 +855,270 @@ export function createApiRouter(
     }
 
     // =========================================================================
-    // 6. PHASE 6 POLICY ENGINE EVALUATION (Least-Privilege Administrative Guardrails)
+    // 6. PHASE 7 HUMAN APPROVAL & ESCALATION PIPELINE INTEGRATION
     // =========================================================================
+    if (approvalId) {
+      // BRANCH A: Resuming an operation with an approved human authorization token
+      const approval = approvalStore.getRequest(approvalId);
+      if (!approval) {
+        return res.status(404).json({
+          error: "APPROVAL_NOT_FOUND",
+          approvalId,
+          message: `Approval request '${approvalId}' not found.`,
+        });
+      }
+
+      // Check lifecycle status
+      if (approval.status === "CONSUMED") {
+        return res.status(409).json({
+          error: "APPROVAL_ALREADY_CONSUMED",
+          approvalId,
+          message: "Replay Attack Detected: Approval request has already been consumed. Approvals are single-use.",
+        });
+      }
+
+      if (approval.status === "EXPIRED") {
+        return res.status(403).json({
+          error: "APPROVAL_EXPIRED",
+          approvalId,
+          message: "Approval request has expired and cannot authorize execution.",
+        });
+      }
+
+      if (approval.status === "REJECTED") {
+        return res.status(403).json({
+          error: "APPROVAL_REJECTED",
+          approvalId,
+          rejectionReason: approval.rejectionReason,
+          message: `Approval request was rejected by operator (${approval.rejectionReason || "No reason given"}). Execution denied.`,
+        });
+      }
+
+      if (approval.status === "CANCELLED") {
+        return res.status(403).json({
+          error: "APPROVAL_CANCELLED",
+          approvalId,
+          message: "Approval request was cancelled. Execution denied.",
+        });
+      }
+
+      if (approval.status === "PENDING") {
+        return res.status(403).json({
+          error: "APPROVAL_PENDING",
+          approvalId,
+          message: "Approval request is currently pending operator decision and cannot authorize execution.",
+        });
+      }
+
+      if (approval.status !== "APPROVED") {
+        return res.status(403).json({
+          error: "INVALID_APPROVAL_STATUS",
+          approvalId,
+          status: approval.status,
+          message: `Approval request is in state '${approval.status}'. Only APPROVED requests can be consumed.`,
+        });
+      }
+
+      // Authoritative server-side expiration check
+      if (Date.now() >= new Date(approval.expiresAt).getTime()) {
+        await hcsLogger.logAuditEvent({
+          type: "APPROVAL_EXPIRED",
+          approvalId: approval.id,
+          agentId: authoritativeAgentId,
+          capId,
+          timestamp: new Date().toISOString(),
+        });
+        return res.status(403).json({
+          error: "APPROVAL_EXPIRED",
+          approvalId,
+          message: "Approval request has expired according to authoritative server time.",
+        });
+      }
+
+      // Cryptographic Request Fingerprint Binding (Tamper Protection)
+      const currentFingerprint = computeRequestFingerprint({
+        agentId: authoritativeAgentId,
+        capId,
+        serviceAddress: capability.serviceAddress,
+        targetResource,
+        requestedAction,
+        requestedAmount: amountToSpend,
+        asset: "HBAR",
+        policyId: approval.policyId || capability.policyId || "default",
+        policyVersion: approval.policyVersion || 1,
+      });
+
+      if (currentFingerprint !== approval.requestFingerprint) {
+        await hcsLogger.logAuditEvent({
+          type: "APPROVAL_EXECUTION_DENIED",
+          approvalId: approval.id,
+          agentId: authoritativeAgentId,
+          capId,
+          amount: amountToSpend,
+          reason: "Request tamper detected: parameters differ from bound approval",
+          timestamp: new Date().toISOString(),
+        });
+        return res.status(403).json({
+          error: "REQUEST_TAMPER_DETECTED",
+          approvalId,
+          expectedFingerprint: approval.requestFingerprint,
+          computedFingerprint: currentFingerprint,
+          message: "Authorization Gate: Execution parameters do not match the cryptographically bound approval request. Approval cannot authorize modified parameters.",
+        });
+      }
+
+      // Re-evaluate policy engine with verified approval context
+      const policyDecision = policyEngine.evaluatePolicies({
+        agentId: authoritativeAgentId,
+        serviceAddress: capability.serviceAddress,
+        action: requestedAction,
+        resource: targetResource,
+        amount: amountToSpend,
+        policyId: capability.policyId,
+        approvalVerified: true,
+        approvedPolicyId: approval.policyId,
+      });
+
+      if (!policyDecision.allowed) {
+        agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
+        await hcsLogger.logAuditEvent({
+          type: "APPROVAL_EXECUTION_DENIED",
+          approvalId: approval.id,
+          agentId: authoritativeAgentId,
+          capId,
+          amount: amountToSpend,
+          policyId: policyDecision.matchedPolicyId,
+          policyName: policyDecision.matchedPolicyName,
+          decisionId: policyDecision.decisionId,
+          reasonCode: policyDecision.reasonCode,
+          reason: policyDecision.primaryReason,
+          timestamp: new Date().toISOString(),
+        });
+
+        return res.status(403).json({
+          error: policyDecision.reasonCode,
+          capId,
+          approvalId,
+          decisionId: policyDecision.decisionId,
+          outcome: policyDecision.outcome,
+          reasonCode: policyDecision.reasonCode,
+          primaryReason: policyDecision.primaryReason,
+          matchedPolicyId: policyDecision.matchedPolicyId,
+          matchedPolicyName: policyDecision.matchedPolicyName,
+          matchedPolicyVersion: policyDecision.matchedPolicyVersion,
+          evaluationTrace: policyDecision.evaluationTrace,
+          message: `Authorization Gate: Policy re-evaluation rejected request: ${policyDecision.primaryReason}`,
+        });
+      }
+
+      // Exact budget verification
+      if (capability.budgetRemaining < amountToSpend) {
+        agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
+        await hcsLogger.logAuditEvent({
+          type: "CAPABILITY_REJECTED",
+          capId,
+          agentId: authoritativeAgentId,
+          amount: amountToSpend,
+          budgetRemaining: capability.budgetRemaining,
+          reason: "Budget Exhausted",
+          timestamp: new Date().toISOString(),
+        });
+
+        return res.status(402).json({
+          error: "INSUFFICIENT_BUDGET",
+          capId,
+          approvalId,
+          budgetRemaining: capability.budgetRemaining,
+          requestedAmount: amountToSpend,
+          message: `On-Chain Enforcement: Attempted call costs ${amountToSpend} units, but remaining budget is ${capability.budgetRemaining}. Real-time rejection enforced on-chain.`,
+        });
+      }
+
+      // Atomically consume approval (Single-Use Replay Prevention)
+      approvalStore.consume(approval.id, currentFingerprint);
+
+      // Decrement memory budget exactly once upon safe consumption
+      const remainingAfterSpend = policyEngine.decrementMemoryBudget(capId, amountToSpend);
+
+      // Record velocity
+      policyEngine.recordVelocity({
+        agentId: authoritativeAgentId,
+        serviceAddress: capability.serviceAddress,
+        action: requestedAction,
+        resource: targetResource,
+        amount: amountToSpend,
+      });
+
+      // Decrypt settlement credential in memory using Ledger Key Ring
+      await keyring.decryptCredential(capability.encryptedCredential);
+
+      // Record successful agent activity in registry
+      agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, true);
+
+      // Log APPROVAL_CONSUMED to Hedera Consensus Service
+      await hcsLogger.logAuditEvent({
+        type: "APPROVAL_CONSUMED",
+        approvalId: approval.id,
+        agentId: authoritativeAgentId,
+        capId,
+        amount: amountToSpend,
+        approverId: approval.decisionBy,
+        requestFingerprint: approval.requestFingerprint,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Write CAPABILITY_SPENT to HCS Audit Trail
+      const hcsResult = await hcsLogger.logAuditEvent({
+        type: "CAPABILITY_SPENT",
+        capId,
+        agentId: authoritativeAgentId,
+        service: capability.serviceAddress,
+        amount: amountToSpend,
+        budgetRemaining: remainingAfterSpend,
+        policyId: policyDecision.matchedPolicyId,
+        policyName: policyDecision.matchedPolicyName,
+        decisionId: policyDecision.decisionId,
+        timestamp: new Date().toISOString(),
+      });
+
+      const promptText = req.body.prompt || "Default input prompt";
+
+      return res.json({
+        status: "SUCCESS",
+        capId,
+        agentId: authoritativeAgentId,
+        agentStatus: agent.status,
+        action: requestedAction,
+        resource: targetResource,
+        amountCharged: amountToSpend,
+        budgetRemaining: remainingAfterSpend,
+        decisionId: policyDecision.decisionId,
+        approval: {
+          id: approval.id,
+          status: "CONSUMED",
+          decisionBy: approval.decisionBy,
+          decisionAt: approval.decisionAt,
+        },
+        policyDecision: {
+          outcome: policyDecision.outcome,
+          reasonCode: policyDecision.reasonCode,
+          matchedPolicyId: policyDecision.matchedPolicyId,
+          matchedPolicyName: policyDecision.matchedPolicyName,
+          matchedPolicyVersion: policyDecision.matchedPolicyVersion,
+        },
+        evaluationTrace: policyDecision.evaluationTrace,
+        hcsAuditMessage: hcsResult.message,
+        data: {
+          service: "Vaultbreaker AI Text Summarizer",
+          inputPrompt: promptText,
+          summaryResult: `[x402 Micropayment Executed with Verified Human Approval] Summarized analysis for: "${promptText.slice(0, 40)}...". Credential protected by Ledger Key Ring. Spend enforced on-chain on Hedera.`,
+          tokenCount: 42,
+          processingTimeMs: 28,
+        },
+      });
+    }
+
+    // BRANCH B: Evaluating standard request without approval token
     const policyDecision = policyEngine.evaluatePolicies({
       agentId: authoritativeAgentId,
       serviceAddress: capability.serviceAddress,
@@ -651,7 +1126,68 @@ export function createApiRouter(
       resource: targetResource,
       amount: amountToSpend,
       policyId: capability.policyId,
+      approvalVerified: false,
     });
+
+    if (policyDecision.outcome === "APPROVAL_REQUIRED") {
+      // Escalation: Zero budget deduction, zero credential exposure, zero execution
+      const approvalReq = approvalStore.createRequest({
+        agentId: authoritativeAgentId,
+        capId,
+        serviceAddress: capability.serviceAddress,
+        targetResource,
+        requestedAction,
+        requestedAmount: amountToSpend,
+        asset: "HBAR",
+        policyId: policyDecision.matchedPolicyId || capability.policyId || "default",
+        policyVersion: policyDecision.matchedPolicyVersion || 1,
+        reason: policyDecision.primaryReason,
+        ttlSeconds: policyDecision.approvalTimeoutSeconds || 3600,
+        metadata: {
+          agentName: agent.name,
+          walletAddress: agent.walletAddress,
+          decisionId: policyDecision.decisionId,
+        },
+      });
+
+      await hcsLogger.logAuditEvent({
+        type: "APPROVAL_REQUESTED",
+        approvalId: approvalReq.id,
+        agentId: authoritativeAgentId,
+        capId,
+        amount: amountToSpend,
+        policyId: policyDecision.matchedPolicyId,
+        policyName: policyDecision.matchedPolicyName,
+        decisionId: policyDecision.decisionId,
+        requestFingerprint: approvalReq.requestFingerprint,
+        reason: policyDecision.primaryReason,
+        timestamp: new Date().toISOString(),
+      });
+
+      return res.status(202).json({
+        status: "APPROVAL_REQUIRED",
+        message: `Transaction of ${amountToSpend} units exceeds autonomous policy threshold. Escalated to human operator approval.`,
+        approval: {
+          id: approvalReq.id,
+          status: approvalReq.status,
+          agentId: approvalReq.agentId,
+          capabilityId: approvalReq.capId,
+          requestedAction: approvalReq.requestedAction,
+          requestedAmount: approvalReq.requestedAmount,
+          asset: approvalReq.asset,
+          policyId: approvalReq.policyId,
+          policyVersion: approvalReq.policyVersion,
+          reason: approvalReq.reason,
+          createdAt: approvalReq.createdAt,
+          expiresAt: approvalReq.expiresAt,
+          fingerprint: approvalReq.requestFingerprint,
+        },
+        decisionId: policyDecision.decisionId,
+        matchedPolicyId: policyDecision.matchedPolicyId,
+        matchedPolicyName: policyDecision.matchedPolicyName,
+        evaluationTrace: policyDecision.evaluationTrace,
+      });
+    }
 
     if (!policyDecision.allowed) {
       agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
@@ -684,15 +1220,8 @@ export function createApiRouter(
     }
 
     // =========================================================================
-    // 7. EXACT BUDGET LIMIT ENFORCEMENT & DEDUCTION
+    // 7. EXACT BUDGET LIMIT ENFORCEMENT & DEDUCTION (Unescalated Path)
     // =========================================================================
-    if (isNaN(amountToSpend) || amountToSpend <= 0) {
-      return res.status(400).json({
-        error: "INVALID_AMOUNT",
-        message: "Payment amount must be a positive integer.",
-      });
-    }
-
     if (capability.budgetRemaining < amountToSpend) {
       agentRegistry.recordActivity(authoritativeAgentId, amountToSpend, false);
       await hcsLogger.logAuditEvent({
