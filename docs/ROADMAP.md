@@ -24,8 +24,8 @@ This roadmap defines the multi-phase evolution of Vaultbreaker from a hackathon 
 - [x] **PHASE 5 — Capability Management** `[COMPLETED]`
   - Canonical capability model with deterministic lifecycle states (`ACTIVE`, `EXHAUSTED`, `EXPIRED`, `REVOKED`), least-privilege action and resource scope enforcement, authoritative agent binding (`AGENT_MISMATCH` prevention), non-negative integer budget accounting, immediate broker revocation with HCS audit logging, and full frontend management in `CapabilitiesView.tsx`.
 
-- [ ] **PHASE 6 — Policy Engine**
-  - Dynamic policy rule evaluator, rate limits, endpoint bindings, multi-tier budget hierarchies, and automated policy enforcement.
+- [x] **PHASE 6 — Policy Engine & Authorization Decision System** `[COMPLETED]`
+  - Canonical policy model with typed conditions (`maxPricePerCall`, `maxCallsPerMinute`, `allowedHoursUtc`, `blockedActions`, `blockedResources`), precedence rules (explicit `DENY` overrides `ALLOW`), priority ordering, dynamic sliding-window velocity tracker, dry-run evaluation endpoint (`POST /api/policies/evaluate`), zero-deduction guarantee on rejection, HCS audit logging for policy lifecycle events, and interactive sandbox in `PoliciesView.tsx`.
 
 - [ ] **PHASE 7 — Human Approval**
   - Multi-sig / human-in-the-loop approval workflows for high-value agent micropayments or policy adjustments exceeding pre-set limits.

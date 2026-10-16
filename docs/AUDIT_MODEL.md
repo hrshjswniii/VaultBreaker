@@ -2,111 +2,98 @@
 
 ## 1. Overview & Audit Philosophy
 
-Auditability is a core pillar of Vaultbreaker. Every significant lifecycle change, capability issuance, metered spend, rejection, revocation, and human approval is immutably logged to the **Hedera Consensus Service (HCS)**.
+Auditability is a core pillar of Vaultbreaker. Every significant lifecycle change, capability issuance, metered spend, rejection, revocation, and policy evaluation is immutably logged to the **Hedera Consensus Service (HCS)**.
 
-This produces a tamper-evident, publicly verifiable record of all autonomous AI agent activity that can be independently verified on HashScan or queried via Hedera Mirror Nodes.
+This produces a tamper-evident, publicly verifiable record of all autonomous AI agent activity that can be independently inspected on HashScan or queried via Hedera Mirror Nodes.
 
 ---
 
-## 2. Event Inventory: Current vs. Target
+## 2. Event Inventory: Baseline & Extended
 
 ```
 Audit Events
-  ├── Current Implementation (Phase 0 Baseline)
+  ├── Core Capability Events
   │     ├── CAPABILITY_ISSUED
   │     ├── CAPABILITY_SPENT
   │     ├── CAPABILITY_REJECTED
   │     └── CAPABILITY_REVOKED
   │
-  └── Target Implementation (Vaultbreaker 2.0 Expansion)
-        ├── AGENT_CREATED
-        ├── AGENT_SUSPENDED
-        ├── AGENT_COMPROMISED
-        ├── POLICY_REGISTERED
+  ├── Agent Lifecycle Events (Phase 4)
+  │     ├── AGENT_REGISTERED
+  │     ├── AGENT_STATUS_CHANGED
+  │     └── AGENT_AUTHORIZATION_DENIED
+  │
+  ├── Policy & Governance Events (Phase 6)
+  │     ├── POLICY_REGISTERED
+  │     ├── POLICY_UPDATED
+  │     ├── POLICY_TOGGLED
+  │     └── POLICY_EVALUATED
+  │
+  └── Future Expansion (Phase 7+)
         ├── APPROVAL_REQUESTED
         ├── APPROVAL_GRANTED
-        ├── APPROVAL_REJECTED
-        ├── PAYMENT_INITIATED
-        ├── PAYMENT_SETTLED
-        ├── PAYMENT_FAILED
-        └── POLICY_VIOLATION
+        └── APPROVAL_REJECTED
 ```
 
 ### Detailed Event Taxonomy
 
 | Event Type | Event Class | Trigger Condition | Primary Data Payload |
 |---|---|---|---|
-| `CAPABILITY_ISSUED` | Current | Developer mints new capability token. | `capId`, `serviceAddress`, `budgetTotal`, `expiry`, `policyHash` |
-| `CAPABILITY_SPENT` | Current | Agent completes valid metered call. | `capId`, `serviceAddress`, `amount`, `budgetRemaining` |
-| `CAPABILITY_REJECTED` | Current | Spend attempt fails budget, expiry, or revocation. | `capId`, `amount`, `budgetRemaining`, `reason` |
-| `CAPABILITY_REVOKED` | Current | Developer or owner revokes capability. | `capId`, `revokedBy` |
-| `AGENT_CREATED` | Target | New Agent registered in Organization. | `agentId`, `ownerId`, `walletAddress` |
-| `AGENT_SUSPENDED` | Target | Admin or system pauses Agent. | `agentId`, `reason` |
-| `AGENT_COMPROMISED` | Target | Anomaly / prompt injection flagged. | `agentId`, `threatScore`, `actionTaken` |
-| `POLICY_REGISTERED` | Target | Developer registers new SpendPolicy. | `policyId`, `maxPricePerCall`, `dailyBudget` |
-| `APPROVAL_REQUESTED` | Target | Spend exceeds auto-approve threshold. | `approvalId`, `agentId`, `requestedAmount` |
-| `APPROVAL_GRANTED` | Target | Human admin approves spend. | `approvalId`, `approverId`, `resolvedAmount` |
-| `APPROVAL_REJECTED` | Target | Human admin rejects spend. | `approvalId`, `approverId`, `reason` |
-| `PAYMENT_SETTLED` | Target | EVM transaction confirmed on Hedera Testnet. | `paymentId`, `txHash`, `amount`, `settledAt` |
-| `POLICY_VIOLATION` | Target | Rate limit or boundary breached. | `agentId`, `policyId`, `violatedRule` |
+| `CAPABILITY_ISSUED` | Capability | Developer mints new capability token. | `capId`, `agentId`, `serviceAddress`, `budgetTotal`, `expiry`, `policyHash` |
+| `CAPABILITY_SPENT` | Capability | Agent completes valid metered call; budget decremented. | `capId`, `serviceAddress`, `amount`, `budgetRemaining` |
+| `CAPABILITY_REJECTED` | Capability | Spend attempt fails budget, expiry, revocation, or policy check. | `capId`, `amount`, `budgetRemaining`, `reason` |
+| `CAPABILITY_REVOKED` | Capability | Developer or owner revokes capability token. | `capId`, `agentId`, `reason` |
+| `AGENT_REGISTERED` | Agent | New agent registered in system. | `agentId`, `name`, `walletAddress` |
+| `AGENT_STATUS_CHANGED` | Agent | Agent lifecycle transitioned (`ACTIVE` ↔ `SUSPENDED` ↔ `REVOKED`). | `agentId`, `previousStatus`, `newStatus`, `reason` |
+| `AGENT_AUTHORIZATION_DENIED` | Agent | Agent lifecycle gate rejects spend attempt. | `agentId`, `capId`, `reason`, `amount` |
+| `POLICY_REGISTERED` | Policy | Developer registers a new SpendPolicy. | `policyId`, `policyName`, `effect`, `priority` |
+| `POLICY_UPDATED` | Policy | Policy conditions, description, or limits modified. | `policyId`, `policyName`, `version`, `reason` |
+| `POLICY_TOGGLED` | Policy | Policy enabled or disabled state toggled. | `policyId`, `policyName`, `enabled`, `version` |
+| `POLICY_EVALUATED` | Policy | Policy evaluation executed during authorization or dry-run. | `decisionId`, `policyId`, `outcome`, `reasonCode`, `amount` |
 
 ---
 
 ## 3. Canonical Audit Event Data Schema
 
+Implemented in `broker/src/hedera/hcs.ts` and mirrored in `app/src/lib/api.ts`:
+
 ```typescript
-export interface CanonicalAuditEvent {
-  // Event Metadata
-  eventId: string;             // UUID v4
-  eventType: string;           // Taxonomy string above
-  timestamp: string;           // ISO-8601 UTC string
-  
-  // Topic & Verification
-  topicId: string;             // Hedera HCS Topic ID (e.g. 0.0.654321)
-  sequenceNumber?: number;     // HCS assigned sequence number
-  txHash?: string;             // EVM transaction hash if settled on-chain
-  
-  // Core Domain Context
-  orgId?: string;
-  agentId?: string;
+export interface HCSAuditEvent {
+  type:
+    | "CAPABILITY_ISSUED"
+    | "CAPABILITY_SPENT"
+    | "CAPABILITY_REJECTED"
+    | "CAPABILITY_REVOKED"
+    | "AGENT_REGISTERED"
+    | "AGENT_STATUS_CHANGED"
+    | "AGENT_AUTHORIZATION_DENIED"
+    | "POLICY_REGISTERED"
+    | "POLICY_UPDATED"
+    | "POLICY_TOGGLED"
+    | "POLICY_EVALUATED";
   capId?: string;
-  serviceAddress?: string;
+  agentId?: string;
+  agentName?: string;
+  previousStatus?: string;
+  newStatus?: string;
   policyId?: string;
-  
-  // Financial Context
+  policyName?: string;
+  decisionId?: string;
+  outcome?: string;
+  reasonCode?: string;
+  service?: string;
   amount?: number;
   budgetRemaining?: number;
-  currency?: string;
-  
-  // Status & Reason
-  status: "SUCCESS" | "REJECTED" | "PENDING" | "ALERT";
   reason?: string;
-  
-  // Verification Reference
-  hashScanUrl?: string;
+  policyHash?: string;
+  timestamp: string;
+  txHash?: string;
 }
 ```
 
 ---
 
-## 4. Hedera HCS Audit Architecture
+## 4. Hedera Consensus Service Integration
 
-```
-[ Broker Event Emitter ]
-       │
-       ▼
-[ HederaHCSLogger (broker/src/hedera/hcs.ts) ]
-       │
-       ├── Mode 1: HEDERA SDK ACTIVE (Operator ID + ECDSA Key Configured)
-       │     └── TopicMessageSubmitTransaction ──> Hedera Testnet Topic (0.0.654321)
-       │                                                    │
-       │                                                    ▼
-       │                                         Hedera Mirror Node API
-       │
-       └── Mode 2: LOCAL MIRROR FEED (Operator Keys Default)
-             └── Appends JSON to inMemoryAuditFeed Array
-       │
-       ▼
-[ Frontend Audit Feed Timeline Component (AuditFeedTimeline.tsx) ]
-       └── Polls /api/audit-feed & renders live event stream + HashScan links
-```
+1. **Production Mode**: When `HEDERA_OPERATOR_ID` and `HEDERA_OPERATOR_KEY` are provided in `.env`, audit events are serialized as JSON and submitted to the target Hedera Topic ID via the Hedera Java/JS SDK (`TopicMessageSubmitTransaction`).
+2. **Mirror Mode & Offline Fallback**: If operator keys are unconfigured, audit events are preserved in the in-memory feed and queryable via `/api/audit-feed` with sequence numbers and timestamps intact.
