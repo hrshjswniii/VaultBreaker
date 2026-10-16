@@ -13,7 +13,14 @@ export interface HCSAuditEvent {
     | "POLICY_REGISTERED"
     | "POLICY_UPDATED"
     | "POLICY_TOGGLED"
-    | "POLICY_EVALUATED";
+    | "POLICY_EVALUATED"
+    | "APPROVAL_REQUESTED"
+    | "APPROVAL_GRANTED"
+    | "APPROVAL_REJECTED"
+    | "APPROVAL_CANCELLED"
+    | "APPROVAL_EXPIRED"
+    | "APPROVAL_CONSUMED"
+    | "APPROVAL_EXECUTION_DENIED";
   capId?: string;
   agentId?: string;
   agentName?: string;
@@ -29,6 +36,10 @@ export interface HCSAuditEvent {
   decisionId?: string;
   outcome?: string;
   reasonCode?: string;
+  approvalId?: string;
+  approverId?: string;
+  approvalStatus?: string;
+  requestFingerprint?: string;
   timestamp: string;
   txHash?: string;
 }
