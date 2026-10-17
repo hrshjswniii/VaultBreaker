@@ -23,7 +23,7 @@ interface DashboardViewProps {
   auditFeed: HCSAuditEvent[];
   keyringStatus: KeyRingStatus | null;
   isBrokerOnline: boolean;
-  onNavigate: (tab: "dashboard" | "developer" | "agent" | "audit") => void;
+  onNavigate: (tab: string) => void;
   onIssueTokenClick: (policyId: string) => void;
 }
 

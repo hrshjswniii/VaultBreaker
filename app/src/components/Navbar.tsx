@@ -14,6 +14,7 @@ import {
   Server,
   TrendingUp,
   FileCode,
+  CheckSquare,
   Menu,
   X
 } from "lucide-react";
@@ -24,6 +25,7 @@ export type NavTab =
   | "agents"
   | "capabilities"
   | "policies"
+  | "approvals"
   | "services"
   | "payments"
   | "audit"
@@ -35,6 +37,7 @@ interface NavbarProps {
   setActiveTab: (tab: NavTab) => void;
   darkMode: boolean;
   toggleDarkMode: () => void;
+  pendingApprovalsCount?: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -43,6 +46,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   setActiveTab,
   darkMode,
   toggleDarkMode,
+  pendingApprovalsCount = 0,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -51,11 +55,17 @@ export const Navbar: React.FC<NavbarProps> = ({
     setMobileMenuOpen(false);
   };
 
-  const navItems: { id: NavTab; label: string; icon: React.ReactNode }[] = [
+  const navItems: { id: NavTab; label: string; icon: React.ReactNode; badge?: number }[] = [
     { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="w-3.5 h-3.5 text-sky-500" /> },
     { id: "agents", label: "Agents", icon: <Bot className="w-3.5 h-3.5 text-indigo-500" /> },
     { id: "capabilities", label: "Capabilities", icon: <KeyRound className="w-3.5 h-3.5 text-purple-500" /> },
     { id: "policies", label: "Policies", icon: <FileCode className="w-3.5 h-3.5 text-sky-600" /> },
+    {
+      id: "approvals",
+      label: "Approvals",
+      icon: <CheckSquare className="w-3.5 h-3.5 text-amber-500" />,
+      badge: pendingApprovalsCount > 0 ? pendingApprovalsCount : undefined,
+    },
     { id: "services", label: "Services", icon: <Server className="w-3.5 h-3.5 text-amber-500" /> },
     { id: "payments", label: "Payments", icon: <TrendingUp className="w-3.5 h-3.5 text-emerald-500" /> },
     { id: "audit", label: "HCS Audit", icon: <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" /> },
@@ -124,6 +134,11 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 {item.icon}
                 {item.label}
+                {item.badge !== undefined && (
+                  <span className="ml-1 px-1.5 py-0.2 rounded-full bg-amber-500 text-white text-[9px] font-bold">
+                    {item.badge}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -164,13 +179,20 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               key={item.id}
               onClick={() => handleNavClick(item.id)}
-              className={`p-2.5 rounded-xl font-bold text-left flex items-center gap-2 ${
+              className={`p-2.5 rounded-xl font-bold text-left flex items-center justify-between gap-2 ${
                 activeTab === item.id
                   ? "bg-sky-50 dark:bg-sky-950 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800"
                   : "text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-800"
               }`}
             >
-              {item.icon} {item.label}
+              <span className="flex items-center gap-2">
+                {item.icon} {item.label}
+              </span>
+              {item.badge !== undefined && (
+                <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-white text-[9px] font-bold">
+                  {item.badge}
+                </span>
+              )}
             </button>
           ))}
         </div>

@@ -8,6 +8,7 @@ import { DashboardView } from "@/components/DashboardView";
 import { AgentsView } from "@/components/AgentsView";
 import { CapabilitiesView } from "@/components/CapabilitiesView";
 import { PoliciesView } from "@/components/PoliciesView";
+import { ApprovalsView } from "@/components/ApprovalsView";
 import { ServicesView } from "@/components/ServicesView";
 import { PaymentsView } from "@/components/PaymentsView";
 import { AgentConsole } from "@/components/AgentConsole";
@@ -20,13 +21,15 @@ import {
   Agent,
   ServiceItem,
   PaymentAttempt,
+  ApprovalRequest,
   fetchHealth,
   fetchPolicies,
   fetchCapabilities,
   fetchAuditFeed,
   fetchAgents,
   fetchServices,
-  fetchPaymentAttempts
+  fetchPaymentAttempts,
+  fetchApprovals
 } from "@/lib/api";
 import { Cpu, Sparkles, ArrowRight } from "lucide-react";
 
@@ -36,6 +39,7 @@ export default function Home() {
   const [isBrokerOnline, setIsBrokerOnline] = useState<boolean>(false);
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [capabilities, setCapabilities] = useState<Capability[]>([]);
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [auditFeed, setAuditFeed] = useState<HCSAuditEvent[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [services, setServices] = useState<ServiceItem[]>([]);
@@ -76,6 +80,9 @@ export default function Home() {
       const pays = await fetchPaymentAttempts();
       setPayments(pays);
 
+      const apps = await fetchApprovals();
+      setApprovals(apps);
+
       setSelectedCapability((prev) => {
         if (!prev) return caps.length > 0 ? caps[0] : null;
         const matching = caps.find((c) => c.capId === prev.capId);
@@ -108,6 +115,8 @@ export default function Home() {
     }
   };
 
+  const pendingApprovalsCount = approvals.filter((a) => a.status === "PENDING").length;
+
   return (
     <div
       className="min-h-screen flex flex-col selection:bg-sky-500 selection:text-white transition-colors duration-300"
@@ -133,6 +142,7 @@ export default function Home() {
         setActiveTab={setActiveTab}
         darkMode={darkMode}
         toggleDarkMode={toggleDarkMode}
+        pendingApprovalsCount={pendingApprovalsCount}
       />
 
       <ConnectionBanner isBrokerOnline={isBrokerOnline} onRetry={loadData} />
@@ -256,6 +266,17 @@ export default function Home() {
             onRefresh={loadData}
             onNavigate={(tab) => setActiveTab(tab as NavTab)}
             onIssueTokenForPolicy={handleIssueTokenClick}
+          />
+        )}
+
+        {activeTab === "approvals" && (
+          <ApprovalsView
+            approvals={approvals}
+            agents={agents}
+            capabilities={capabilities}
+            policies={policies}
+            onRefresh={loadData}
+            onNavigate={(tab) => setActiveTab(tab as NavTab)}
           />
         )}
 

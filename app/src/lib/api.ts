@@ -1,4 +1,4 @@
-export type PolicyEffect = "ALLOW" | "DENY";
+export type PolicyEffect = "ALLOW" | "DENY" | "APPROVAL_REQUIRED";
 
 export interface PolicyConditions {
   maxPricePerCall?: number;
@@ -7,6 +7,9 @@ export interface PolicyConditions {
   allowedHoursUtc?: { startHour: number; endHour: number };
   blockedActions?: string[];
   blockedResources?: string[];
+  requireApprovalAbove?: number;
+  requireApproval?: boolean;
+  approvalTimeoutSeconds?: number;
 }
 
 export interface Policy {
@@ -42,9 +45,10 @@ export interface PolicyEvaluationContext {
 export interface PolicyEvaluationResult {
   allowed: boolean;
   decisionId: string;
-  outcome: "ALLOWED" | "DENIED";
+  outcome: "ALLOWED" | "DENIED" | "APPROVAL_REQUIRED";
   reasonCode:
     | "AUTHORIZED"
+    | "APPROVAL_REQUIRED"
     | "POLICY_DENIED"
     | "PRICE_LIMIT_EXCEEDED"
     | "VELOCITY_LIMIT_EXCEEDED"
@@ -57,8 +61,56 @@ export interface PolicyEvaluationResult {
   matchedPolicyId?: string;
   matchedPolicyName?: string;
   matchedPolicyVersion?: number;
+  requiresApproval?: boolean;
+  approvalThreshold?: number;
+  approvalTimeoutSeconds?: number;
   evaluationTrace: EvaluationStep[];
   timestamp: string;
+}
+
+export type ApprovalStatus =
+  | "PENDING"
+  | "APPROVED"
+  | "REJECTED"
+  | "EXPIRED"
+  | "CANCELLED"
+  | "CONSUMED";
+
+export interface ApprovalRequest {
+  approvalId: string;
+  id: string;
+  correlationId: string;
+  agentId: string;
+  capId: string;
+  serviceAddress: string;
+  targetResource: string;
+  requestedAction: string;
+  requestedAmount: number;
+  asset: string;
+  policyId: string;
+  policyVersion: number;
+  reason: string;
+  policyThreshold?: number;
+  approvalScope?: string;
+  status: ApprovalStatus;
+  requestFingerprint: string;
+  createdAt: string;
+  expiresAt: string;
+  decidedAt?: string;
+  decisionAt?: string;
+  decidedBy?: string;
+  decisionBy?: string;
+  decisionReason?: string;
+  rejectionReason?: string;
+  consumedAt?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface SecurityBoundaryStatus {
+  mode: "DEVELOPMENT_DEMO_MODE" | "PRODUCTION_AUTH_ENFORCED";
+  authMechanism: string;
+  trustedIdentityEnforced: boolean;
+  notice: string;
 }
 
 export type CapabilityStatus = "ACTIVE" | "EXHAUSTED" | "EXPIRED" | "REVOKED";
@@ -345,6 +397,67 @@ const mockStore = {
   ]),
   capabilities: new Map<string, Capability>(),
   agents: new Map<string, Agent>(demoAgents.map((a) => [a.id, { ...a }])),
+  approvals: new Map<string, ApprovalRequest>([
+    [
+      "appr_demo_001",
+      {
+        approvalId: "appr_demo_001",
+        id: "appr_demo_001",
+        correlationId: "corr_alpha_987",
+        agentId: "agent_alpha",
+        capId: "cap_alpha_01",
+        serviceAddress: "0x0000000000000000000000000000000000000004",
+        targetResource: "/api/metered-service",
+        requestedAction: "EXECUTE_METERED_SERVICE",
+        requestedAmount: 75,
+        asset: "HBAR",
+        policyId: "pol_ai_summarizer_v1",
+        policyVersion: 1,
+        reason: "Transaction amount of 75 HBAR exceeds auto-approval threshold (50 HBAR)",
+        policyThreshold: 50,
+        status: "PENDING",
+        requestFingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        createdAt: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
+        expiresAt: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
+        metadata: {
+          agentName: "Agent Alpha (Summarizer)",
+          promptPreview: "Generate cross-chain arbitrage synthesis report...",
+        },
+      },
+    ],
+    [
+      "appr_demo_002",
+      {
+        approvalId: "appr_demo_002",
+        id: "appr_demo_002",
+        correlationId: "corr_beta_432",
+        agentId: "agent_beta",
+        capId: "cap_beta_01",
+        serviceAddress: "0x0000000000000000000000000000000000000004",
+        targetResource: "/api/metered-service",
+        requestedAction: "EXECUTE_METERED_SERVICE",
+        requestedAmount: 120,
+        asset: "HBAR",
+        policyId: "pol_ai_summarizer_v1",
+        policyVersion: 1,
+        reason: "High compute allocation batch exceeding autonomous limits",
+        policyThreshold: 50,
+        status: "APPROVED",
+        requestFingerprint: "7d793037a0760186574b0282f2f435e709c6c04d6da9454142f36cedda508d40",
+        createdAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        expiresAt: new Date(Date.now() + 120 * 60 * 1000).toISOString(),
+        decidedAt: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
+        decisionAt: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
+        decidedBy: "operator_demo_local",
+        decisionBy: "operator_demo_local",
+        decisionReason: "Approved for quarter-end ledger consensus run",
+        rejectionReason: undefined,
+        metadata: {
+          agentName: "Agent Beta (Compute Node)",
+        },
+      },
+    ],
+  ]),
   auditFeed: [] as HCSAuditEvent[],
   paymentAttempts: [] as PaymentAttempt[],
   brokerOnline: false,
@@ -1609,4 +1722,195 @@ export async function fetchServices(): Promise<ServiceItem[]> {
 
 export async function fetchPaymentAttempts(): Promise<PaymentAttempt[]> {
   return mockStore.paymentAttempts;
+}
+
+// ===========================================================================
+// Phase 7: Human Approval & Escalation Client API
+// ===========================================================================
+
+export async function fetchApprovals(filter?: {
+  status?: string;
+  agentId?: string;
+  limit?: number;
+}): Promise<ApprovalRequest[]> {
+  if (mockStore.brokerOnline) {
+    try {
+      const q = new URLSearchParams();
+      if (filter?.status) q.append("status", filter.status);
+      if (filter?.agentId) q.append("agentId", filter.agentId);
+      if (filter?.limit) q.append("limit", String(filter.limit));
+      const url = `${BROKER_BASE_URL}/api/approvals${q.toString() ? `?${q.toString()}` : ""}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // Fall through to mock
+    }
+  }
+
+  // Fallback to local mock approvals
+  const list = Array.from(mockStore.approvals.values());
+  const now = Date.now();
+  for (const a of list) {
+    if (a.status === "PENDING" && now >= new Date(a.expiresAt).getTime()) {
+      a.status = "EXPIRED";
+    }
+  }
+
+  return list.filter((a) => {
+    if (filter?.status && a.status !== filter.status) return false;
+    if (filter?.agentId && a.agentId !== filter.agentId) return false;
+    return true;
+  }).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+}
+
+export async function fetchApproval(id: string): Promise<ApprovalRequest> {
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/approvals/${id}`);
+    if (res.ok) {
+      return await res.json();
+    }
+    const err = await res.json();
+    throw new Error(err.message || err.error || "Approval request not found");
+  }
+
+  const app = mockStore.approvals.get(id);
+  if (!app) throw new Error(`NOT_FOUND: Approval '${id}' not found`);
+  return app;
+}
+
+export async function approveRequest(id: string): Promise<{ success: boolean; approval: ApprovalRequest; mode: string }> {
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/approvals/${id}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || data.error || "Failed to approve request");
+    }
+    return data;
+  }
+
+  const app = mockStore.approvals.get(id);
+  if (!app) throw new Error(`NOT_FOUND: Approval '${id}' not found`);
+  if (app.status !== "PENDING") {
+    throw new Error(`INVALID_TRANSITION: Cannot approve request in state '${app.status}'`);
+  }
+  app.status = "APPROVED";
+  app.decidedAt = new Date().toISOString();
+  app.decisionAt = app.decidedAt;
+  app.decidedBy = "operator_demo_local";
+  app.decisionBy = "operator_demo_local";
+
+  mockStore.auditFeed.unshift({
+    type: "APPROVAL_GRANTED" as any,
+    approvalId: app.id,
+    agentId: app.agentId,
+    capId: app.capId,
+    amount: app.requestedAmount,
+    approverId: "operator_demo_local",
+    requestFingerprint: app.requestFingerprint,
+    timestamp: new Date().toISOString(),
+  } as any);
+
+  return { success: true, approval: app, mode: "DEVELOPMENT_DEMO_MODE" };
+}
+
+export async function rejectRequest(
+  id: string,
+  reason: string
+): Promise<{ success: boolean; approval: ApprovalRequest; mode: string }> {
+  if (!reason || !reason.trim()) {
+    throw new Error("REASON_REQUIRED: Rejection requires an explicit human-readable reason.");
+  }
+
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/approvals/${id}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: reason.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || data.error || "Failed to reject request");
+    }
+    return data;
+  }
+
+  const app = mockStore.approvals.get(id);
+  if (!app) throw new Error(`NOT_FOUND: Approval '${id}' not found`);
+  if (app.status !== "PENDING") {
+    throw new Error(`INVALID_TRANSITION: Cannot reject request in state '${app.status}'`);
+  }
+  app.status = "REJECTED";
+  app.decidedAt = new Date().toISOString();
+  app.decisionAt = app.decidedAt;
+  app.decidedBy = "operator_demo_local";
+  app.decisionBy = "operator_demo_local";
+  app.decisionReason = reason.trim();
+  app.rejectionReason = reason.trim();
+
+  mockStore.auditFeed.unshift({
+    type: "APPROVAL_REJECTED" as any,
+    approvalId: app.id,
+    agentId: app.agentId,
+    capId: app.capId,
+    amount: app.requestedAmount,
+    approverId: "operator_demo_local",
+    reason: reason.trim(),
+    timestamp: new Date().toISOString(),
+  } as any);
+
+  return { success: true, approval: app, mode: "DEVELOPMENT_DEMO_MODE" };
+}
+
+export async function cancelRequest(
+  id: string,
+  reason?: string
+): Promise<{ success: boolean; approval: ApprovalRequest }> {
+  if (mockStore.brokerOnline) {
+    const res = await fetch(`${BROKER_BASE_URL}/api/approvals/${id}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: reason || "Cancelled by operator" }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.message || data.error || "Failed to cancel request");
+    }
+    return data;
+  }
+
+  const app = mockStore.approvals.get(id);
+  if (!app) throw new Error(`NOT_FOUND: Approval '${id}' not found`);
+  if (app.status !== "PENDING") {
+    throw new Error(`INVALID_TRANSITION: Cannot cancel request in state '${app.status}'`);
+  }
+  app.status = "CANCELLED";
+  app.decidedAt = new Date().toISOString();
+  app.decisionReason = reason || "Cancelled by operator";
+
+  return { success: true, approval: app };
+}
+
+export async function fetchApprovalSecurityBoundary(): Promise<SecurityBoundaryStatus> {
+  if (mockStore.brokerOnline) {
+    try {
+      const res = await fetch(`${BROKER_BASE_URL}/api/approvals/status/security-boundary`);
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch {
+      // Fallback
+    }
+  }
+
+  return {
+    mode: "DEVELOPMENT_DEMO_MODE",
+    authMechanism: "DEMO_FALLBACK_IDENTIFIER",
+    trustedIdentityEnforced: false,
+    notice: "Phase 7 establishes cryptographic request binding, deterministic state machine, and replay protection. External IdP (OIDC/SAML) is required before deploying production human identity.",
+  };
 }
