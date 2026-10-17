@@ -27,8 +27,8 @@ This roadmap defines the multi-phase evolution of Vaultbreaker from a hackathon 
 - [x] **PHASE 6 — Policy Engine & Authorization Decision System** `[COMPLETED]`
   - Canonical policy model with typed conditions (`maxPricePerCall`, `maxCallsPerMinute`, `allowedHoursUtc`, `blockedActions`, `blockedResources`), precedence rules (explicit `DENY` overrides `ALLOW`), priority ordering, dynamic sliding-window velocity tracker, dry-run evaluation endpoint (`POST /api/policies/evaluate`), zero-deduction guarantee on rejection, HCS audit logging for policy lifecycle events, and interactive sandbox in `PoliciesView.tsx`.
 
-- [ ] **PHASE 7 — Human Approval**
-  - Multi-sig / human-in-the-loop approval workflows for high-value agent micropayments or policy adjustments exceeding pre-set limits.
+- [x] **PHASE 7 — Human Approval & Escalation** `[COMPLETED]`
+  - Human-in-the-loop escalation and authorization infrastructure for high-value or high-risk autonomous AI agent actions. Canonical 6-state finite state machine (`PENDING`, `APPROVED`, `REJECTED`, `EXPIRED`, `CANCELLED`, `CONSUMED`), cryptographic SHA-256 request fingerprint binding 9 immutable execution parameters, policy escalation thresholds (`requireApprovalAbove`, `requireApproval`, `approvalTimeoutSeconds`, `APPROVAL_REQUIRED`), non-overridable safety checks upon resumption, single-use replay prevention (`CONSUMED`), operator authentication boundary (`verifyOperatorAuth`), zero budget deduction on pending/rejected requests, HCS audit trail integration, and operator-facing Approval Inbox UI in `ApprovalsView.tsx`.
 
 - [ ] **PHASE 8 — Agent SDK**
   - Client SDK libraries for Python and TypeScript/Node.js enabling AI agent frameworks (LangChain, AutoGen, CrewAI) to consume capability tokens seamlessly.

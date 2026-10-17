@@ -2,7 +2,7 @@
 
 ## 1. Overview & Audit Philosophy
 
-Auditability is a core pillar of Vaultbreaker. Every significant lifecycle change, capability issuance, metered spend, rejection, revocation, and policy evaluation is immutably logged to the **Hedera Consensus Service (HCS)**.
+Auditability is a core pillar of Vaultbreaker. Every significant lifecycle change, capability issuance, metered spend, rejection, revocation, policy evaluation, and human approval transition is immutably logged to the **Hedera Consensus Service (HCS)**.
 
 This produces a tamper-evident, publicly verifiable record of all autonomous AI agent activity that can be independently inspected on HashScan or queried via Hedera Mirror Nodes.
 
@@ -29,10 +29,14 @@ Audit Events
   │     ├── POLICY_TOGGLED
   │     └── POLICY_EVALUATED
   │
-  └── Future Expansion (Phase 7+)
+  └── Human Approval & Escalation Events (Phase 7)
         ├── APPROVAL_REQUESTED
         ├── APPROVAL_GRANTED
-        └── APPROVAL_REJECTED
+        ├── APPROVAL_REJECTED
+        ├── APPROVAL_CANCELLED
+        ├── APPROVAL_EXPIRED
+        ├── APPROVAL_CONSUMED
+        └── APPROVAL_EXECUTION_DENIED
 ```
 
 ### Detailed Event Taxonomy
@@ -50,6 +54,13 @@ Audit Events
 | `POLICY_UPDATED` | Policy | Policy conditions, description, or limits modified. | `policyId`, `policyName`, `version`, `reason` |
 | `POLICY_TOGGLED` | Policy | Policy enabled or disabled state toggled. | `policyId`, `policyName`, `enabled`, `version` |
 | `POLICY_EVALUATED` | Policy | Policy evaluation executed during authorization or dry-run. | `decisionId`, `policyId`, `outcome`, `reasonCode`, `amount` |
+| `APPROVAL_REQUESTED` | Approval | Policy threshold triggers human escalation; pending request created. | `approvalId`, `agentId`, `capId`, `amount`, `requestFingerprint` |
+| `APPROVAL_GRANTED` | Approval | Human operator authorizes execution request. | `approvalId`, `approverId`, `requestFingerprint`, `amount` |
+| `APPROVAL_REJECTED` | Approval | Human operator rejects execution request with explicit reason. | `approvalId`, `approverId`, `reason`, `amount` |
+| `APPROVAL_CANCELLED` | Approval | Pending request cancelled prior to decision. | `approvalId`, `reason` |
+| `APPROVAL_EXPIRED` | Approval | Request expired before operator decision or consumption. | `approvalId`, `reason` |
+| `APPROVAL_CONSUMED` | Approval | Approved request consumed during metered service execution. | `approvalId`, `agentId`, `capId`, `amount` |
+| `APPROVAL_EXECUTION_DENIED` | Approval | Resumption denied due to fingerprint mismatch, replay, or expiry. | `approvalId`, `reason`, `requestFingerprint` |
 
 ---
 
@@ -70,7 +81,14 @@ export interface HCSAuditEvent {
     | "POLICY_REGISTERED"
     | "POLICY_UPDATED"
     | "POLICY_TOGGLED"
-    | "POLICY_EVALUATED";
+    | "POLICY_EVALUATED"
+    | "APPROVAL_REQUESTED"
+    | "APPROVAL_GRANTED"
+    | "APPROVAL_REJECTED"
+    | "APPROVAL_CANCELLED"
+    | "APPROVAL_EXPIRED"
+    | "APPROVAL_CONSUMED"
+    | "APPROVAL_EXECUTION_DENIED";
   capId?: string;
   agentId?: string;
   agentName?: string;
@@ -86,6 +104,9 @@ export interface HCSAuditEvent {
   budgetRemaining?: number;
   reason?: string;
   policyHash?: string;
+  approvalId?: string;
+  approverId?: string;
+  requestFingerprint?: string;
   timestamp: string;
   txHash?: string;
 }
